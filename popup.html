@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>网页浏览时间统计</title>
+  <meta charset="UTF-8">
+  <script src="echarts.min.js"></script>
+  <style>
+    body {
+      font-family: sans-serif;
+      width: 400px;
+      padding: 10px;
+    }
+    h1, h2 {
+      text-align: center;
+      color: #333;
+    }
+    .report-section {
+      margin-bottom: 20px;
+      border: 1px solid #ddd;
+      padding: 10px;
+      border-radius: 5px;
+      background-color: #f9f9f9;
+    }
+    .report-section h2 {
+        margin-top: 0;
+        font-size: 1.2em;
+        border-bottom: 1px solid #eee;
+        padding-bottom: 5px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 8px;
+      text-align: left;
+    }
+    th {
+      background-color: #f0f0f0;
+    }
+    .no-data {
+        text-align: center;
+        color: #777;
+        padding: 10px;
+    }
+    .controls {
+        text-align: center;
+        margin-bottom: 15px;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 8px 6px;
+    }
+    .controls button {
+        padding: 7px 10px;
+        margin: 0;
+        background-color: #4CAF50;
+        color: white;
+        border: none;
+        border-radius: 3px;
+        cursor: pointer;
+        font-size: 13px;
+        line-height: 1.2;
+        vertical-align: middle;
+        box-sizing: border-box;
+        min-width: 70px;
+    }
+    .controls button:hover {
+        background-color: #45a049;
+    }
+    .controls button.selected {
+      background-color: #2196F3;
+      color: #fff;
+      font-weight: bold;
+      border: 2px solid #1976D2;
+    }
+    .controls button.disabled {
+      background-color: #eee;
+      color: #aaa;
+      border: 1px solid #ccc;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <h1>浏览时间统计</h1>
+
+  <div class="controls">
+    <div style="display:flex;justify-content:center;gap:8px 6px;margin-bottom:8px;">
+      <button id="todayBtn">今日数据</button>
+      <button id="thisWeekBtn">本周数据</button>
+    </div>
+    <div style="display:flex;justify-content:center;gap:8px 6px;">
+      <button id="prevDayBtn">&lt; 前一天</button>
+      <button id="nextDayBtn">后一天 &gt;</button>
+      <button id="prevWeekBtn">&lt; 上一周</button>
+      <button id="nextWeekBtn">下一周 &gt;</button>
+    </div>
+  </div>
+
+  <div class="report-section" id="dailyReport">
+    <h2 id="dailyReportTitle">每日报告</h2>
+    <table id="dailyTable">
+      <thead>
+        <tr>
+          <th>域名</th>
+          <th>网页标题</th>
+          <th>时长</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- Data will be inserted here by JavaScript -->
+      </tbody>
+    </table>
+    <div class="no-data" id="noDailyData">暂无数据</div>
+    <div id="dailyChartContainer" style="width: 100%; height:300px; margin-top:15px;"></div>
+  </div>
+
+  <div class="report-section" id="weeklyReport">
+    <h2 id="weeklyReportTitle">每周报告</h2>
+    <table id="weeklyTable">
+      <thead>
+        <tr>
+          <th>域名</th>
+          <th>网页标题</th>
+          <th>时长</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- Data will be inserted here by JavaScript -->
+      </tbody>
+    </table>
+    <div class="no-data" id="noWeeklyData">暂无数据</div>
+    <div id="weeklyChartContainer" style="width: 100%; height:300px; margin-top:15px;"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

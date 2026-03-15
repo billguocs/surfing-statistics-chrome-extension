@@ -1,328 +1,987 @@
-// background.js
+const STORAGE_KEY = "statsV2";
+const SESSION_KEY = "activeSession";
+const CATEGORY_CONFIG_KEY = "categoryConfig";
+const GOAL_CONFIG_KEY = "goalConfig";
+const FOCUS_CONFIG_KEY = "focusConfig";
+const BEHAVIOR_RUNTIME_KEY = "behaviorRuntime";
+const LEGACY_KEYS = ["dailyStats", "weeklyStats", "tabMeta"];
+const EXCLUDED_PROTOCOLS = ["about:", "chrome:", "chrome-extension:", "edge:"];
+const BEHAVIOR_ALARM_NAME = "behavior-check";
+const DEFAULT_CATEGORIES = [
+  { id: "work", name: "工作", system: true },
+  { id: "study", name: "学习", system: true },
+  { id: "entertainment", name: "娱乐", system: true },
+  { id: "social", name: "社交", system: true },
+  { id: "tools", name: "工具", system: true },
+  { id: "other", name: "其他", system: true },
+];
 
-let activeTabId = null;
-let tabStartTime = {}; // Stores the start time for each tab { tabId: timestamp }
-let tabUrlMap = {}; // Stores the URL for each tab { tabId: url }
-let tabTitleMap = {}; // Stores the title for each tab { tabId: title }
+const DEFAULT_GOAL_CONFIG = {
+  enabled: false,
+  categoryGoals: {},
+};
 
-// Function to extract hostname from URL
-function getHostnameFromUrl(url) {
-  try {
-    // Ensure the URL has a scheme, otherwise URL constructor might fail or use current page's scheme
-    if (
-      url &&
-      !url.startsWith("http://") &&
-      !url.startsWith("https://") &&
-      !url.startsWith("ftp://")
-    ) {
-      // For URLs like 'localhost:3000' or 'example.com' without a scheme
-      // we can't reliably parse them with new URL() directly if they are not absolute.
-      // However, for extension internal pages or special schemes, we might want to keep them as is or handle differently.
-      // For now, if it doesn't look like a standard web URL, return it as is or a placeholder.
-      if (url.includes(":") && !url.startsWith("chrome")) {
-        // e.g. localhost:8000
-        // try to prepend http, this might not always be correct but works for common dev servers
-        return new URL(`http://${url}`).hostname;
+const DEFAULT_FOCUS_CONFIG = {
+  enabled: false,
+  allowedCategoryIds: ["work", "study", "tools"],
+  distractionReminderEnabled: false,
+  distractionCategoryIds: ["entertainment", "social"],
+  distractionThresholdMinutes: 15,
+};
+
+let writeQueue = Promise.resolve();
+let initializationPromise = null;
+
+function storageGet(area, keys) {
+  return new Promise((resolve) => {
+    chrome.storage[area].get(keys, resolve);
+  });
+}
+
+function storageSet(area, items) {
+  return new Promise((resolve, reject) => {
+    chrome.storage[area].set(items, () => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
       }
-      return url; // Return original if not a standard http/https/ftp URL (e.g. chrome://, file://)
+      resolve();
+    });
+  });
+}
+
+function storageRemove(area, keys) {
+  return new Promise((resolve, reject) => {
+    chrome.storage[area].remove(keys, () => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function tabsGet(tabId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.get(tabId, (tab) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(tab);
+    });
+  });
+}
+
+function tabsQuery(queryInfo) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.query(queryInfo, (tabs) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(tabs);
+    });
+  });
+}
+
+function cloneStats(stats) {
+  return {
+    version: stats?.version || 2,
+    updatedAt: stats?.updatedAt || null,
+    daily: { ...(stats?.daily || {}) },
+    weekly: { ...(stats?.weekly || {}) },
+  };
+}
+
+function createEmptyStats() {
+  return { version: 2, updatedAt: null, daily: {}, weekly: {} };
+}
+
+function createDefaultCategoryConfig(existingConfig = {}) {
+  const existingCategories = Array.isArray(existingConfig.categories)
+    ? existingConfig.categories
+    : [];
+  const existingMap = existingConfig.siteCategoryMap || {};
+  const categoryMap = new Map(existingCategories.map((category) => [category.id, category]));
+
+  for (const category of DEFAULT_CATEGORIES) {
+    if (!categoryMap.has(category.id)) {
+      categoryMap.set(category.id, category);
+      continue;
     }
-    return new URL(url).hostname;
-  } catch (e) {
-    console.warn("Invalid URL for hostname extraction:", url, e);
-    return url; // Return original URL as fallback if parsing fails
+
+    categoryMap.set(category.id, {
+      ...categoryMap.get(category.id),
+      system: true,
+      name: category.name,
+    });
+  }
+
+  const categories = Array.from(categoryMap.values());
+  const validCategoryIds = new Set(categories.map((category) => category.id));
+  const siteCategoryMap = {};
+
+  for (const [hostname, categoryId] of Object.entries(existingMap)) {
+    siteCategoryMap[hostname] = validCategoryIds.has(categoryId) ? categoryId : "other";
+  }
+
+  return { categories, siteCategoryMap };
+}
+
+function isTrackableUrl(url) {
+  try {
+    const parsedUrl = new URL(url);
+    return !EXCLUDED_PROTOCOLS.includes(parsedUrl.protocol);
+  } catch (error) {
+    return false;
   }
 }
 
-// Function to get current date in YYYY-MM-DD format
-function getCurrentDate() {
-  const today = new Date();
-  const year = today.getFullYear();
-  const month = String(today.getMonth() + 1).padStart(2, "0");
-  const day = String(today.getDate()).padStart(2, "0");
+function getHostnameFromUrl(url) {
+  try {
+    return new URL(url).hostname;
+  } catch (error) {
+    return "";
+  }
+}
+
+function toDateKey(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
 
-// Function to get current week number
-function getCurrentWeek() {
-  const today = new Date();
-  const firstDayOfYear = new Date(today.getFullYear(), 0, 1);
-  const pastDaysOfYear = (today - firstDayOfYear) / 86400000;
-  return Math.ceil((pastDaysOfYear + firstDayOfYear.getDay() + 1) / 7);
+function getIsoWeekInfo(date) {
+  const utcDate = new Date(
+    Date.UTC(date.getFullYear(), date.getMonth(), date.getDate())
+  );
+  const day = utcDate.getUTCDay() || 7;
+  utcDate.setUTCDate(utcDate.getUTCDate() + 4 - day);
+  const isoYear = utcDate.getUTCFullYear();
+  const yearStart = new Date(Date.UTC(isoYear, 0, 1));
+  const weekNumber = Math.ceil(((utcDate - yearStart) / 86400000 + 1) / 7);
+
+  return {
+    isoYear,
+    weekNumber,
+    weekKey: `${isoYear}-W${String(weekNumber).padStart(2, "0")}`,
+  };
 }
 
-// Function to update time spent on a tab
-async function updateTabTime(tabId, endTime) {
-  if (tabStartTime[tabId] && tabUrlMap[tabId]) {
-    const startTime = tabStartTime[tabId];
-    const duration = Math.round((endTime - startTime) / 1000); // Duration in seconds
-    const fullUrl = tabUrlMap[tabId];
-    const hostname = getHostnameFromUrl(fullUrl);
-    const title = tabTitleMap[tabId] || "";
-    // Log time if duration is positive, hostname is valid, and it's not a chrome internal page
-    if (
-      duration > 0 &&
-      hostname &&
-      fullUrl &&
-      !fullUrl.startsWith("chrome://") &&
-      !fullUrl.startsWith("about:")
-    ) {
-      console.log(
-        `Tab ${tabId} (${hostname} from ${fullUrl}) was active for ${duration} seconds. Title: ${title}`
-      );
-      const today = getCurrentDate();
-      const currentWeek = getCurrentWeek();
-      chrome.storage.local.get(["dailyStats", "weeklyStats", "tabMeta"], (result) => {
-        let dailyStats = result.dailyStats || {};
-        let weeklyStats = result.weeklyStats || {};
-        let tabMeta = result.tabMeta || {};
-        // Update daily stats
-        dailyStats[today] = dailyStats[today] || {};
-        dailyStats[today][hostname] = (dailyStats[today][hostname] || 0) + duration;
-        // Update weekly stats
-        const weekKey = `${new Date().getFullYear()}-W${String(currentWeek).padStart(2, "0")}`;
-        weeklyStats[weekKey] = weeklyStats[weekKey] || {};
-        weeklyStats[weekKey][hostname] = (weeklyStats[weekKey][hostname] || 0) + duration;
-        // Store meta info: { [hostname]: { url, title } }
-        tabMeta[hostname] = { url: fullUrl, title };
-        chrome.storage.local.set({ dailyStats, weeklyStats, tabMeta }, () => {
-          console.log(
-            "Time logged for",
-            hostname,
-            "Daily:",
-            dailyStats,
-            "Weekly:",
-            weeklyStats,
-            "Meta:",
-            tabMeta
-          );
-        });
+function getNextBoundary(timestamp) {
+  const current = new Date(timestamp);
+  const nextMidnight = new Date(current);
+  nextMidnight.setHours(24, 0, 0, 0);
+
+  const nextWeekStart = new Date(current);
+  const day = nextWeekStart.getDay();
+  const diffToMonday = day === 0 ? 1 : 8 - day;
+  nextWeekStart.setDate(nextWeekStart.getDate() + diffToMonday);
+  nextWeekStart.setHours(0, 0, 0, 0);
+
+  return Math.min(nextMidnight.getTime(), nextWeekStart.getTime());
+}
+
+function splitRangeByDateAndWeek(startTime, endTime) {
+  const segments = [];
+  let segmentStart = startTime;
+
+  while (segmentStart < endTime) {
+    const boundary = getNextBoundary(segmentStart);
+    const segmentEnd = Math.min(boundary, endTime);
+    const durationSeconds = Math.round((segmentEnd - segmentStart) / 1000);
+
+    if (durationSeconds > 0) {
+      const segmentDate = new Date(segmentStart);
+      segments.push({
+        dateKey: toDateKey(segmentDate),
+        weekKey: getIsoWeekInfo(segmentDate).weekKey,
+        seconds: durationSeconds,
       });
     }
+
+    segmentStart = segmentEnd;
+  }
+
+  return segments;
+}
+
+function normalizeSession(session) {
+  if (
+    !session ||
+    !session.tabId ||
+    !session.url ||
+    !session.hostname ||
+    !session.startedAt
+  ) {
+    return null;
+  }
+
+  return {
+    tabId: session.tabId,
+    url: session.url,
+    hostname: session.hostname,
+    title: session.title || "",
+    faviconUrl: session.faviconUrl || "",
+    startedAt: session.startedAt,
+    isRunning: Boolean(session.isRunning),
+  };
+}
+
+function createSessionFromTab(tab, startedAt, isRunning = true) {
+  if (!tab?.id || !tab.url || !isTrackableUrl(tab.url)) {
+    return null;
+  }
+
+  return {
+    tabId: tab.id,
+    url: tab.url,
+    hostname: getHostnameFromUrl(tab.url),
+    title: tab.title || "",
+    faviconUrl: tab.favIconUrl || "",
+    startedAt,
+    isRunning,
+  };
+}
+
+async function getSession() {
+  const result = await storageGet("session", SESSION_KEY);
+  return normalizeSession(result[SESSION_KEY]);
+}
+
+async function setSession(session) {
+  if (!session) {
+    await storageRemove("session", SESSION_KEY);
+    return;
+  }
+
+  await storageSet("session", {
+    [SESSION_KEY]: {
+      ...session,
+      hostname: getHostnameFromUrl(session.url),
+    },
+  });
+}
+
+function mergeEntry(entry, seconds, session) {
+  return {
+    seconds: (entry?.seconds || 0) + seconds,
+    lastTitle: session.title || entry?.lastTitle || "",
+    lastUrl: session.url || entry?.lastUrl || "",
+    faviconUrl: session.faviconUrl || entry?.faviconUrl || "",
+  };
+}
+
+async function withQueuedWrite(task) {
+  writeQueue = writeQueue.then(task, task);
+  return writeQueue;
+}
+
+async function readStats() {
+  const result = await storageGet("local", STORAGE_KEY);
+  return cloneStats(result[STORAGE_KEY] || createEmptyStats());
+}
+
+async function writeStats(stats) {
+  await storageSet("local", {
+    [STORAGE_KEY]: {
+      ...stats,
+      version: 2,
+      updatedAt: new Date().toISOString(),
+    },
+  });
+}
+
+async function getCategoryConfig() {
+  const result = await storageGet("local", CATEGORY_CONFIG_KEY);
+  return createDefaultCategoryConfig(result[CATEGORY_CONFIG_KEY] || {});
+}
+
+async function setCategoryConfig(categoryConfig) {
+  await storageSet("local", {
+    [CATEGORY_CONFIG_KEY]: createDefaultCategoryConfig(categoryConfig),
+  });
+}
+
+function createDefaultGoalConfig(goalConfig = {}) {
+  const categoryGoals = {};
+
+  for (const [categoryId, minutes] of Object.entries(goalConfig.categoryGoals || {})) {
+    const normalizedMinutes = Math.max(0, Number(minutes) || 0);
+    if (normalizedMinutes > 0) {
+      categoryGoals[categoryId] = normalizedMinutes;
+    }
+  }
+
+  return {
+    enabled: Boolean(goalConfig.enabled),
+    categoryGoals,
+  };
+}
+
+function createDefaultFocusConfig(focusConfig = {}) {
+  const allowedCategoryIds = Array.isArray(focusConfig.allowedCategoryIds)
+    ? Array.from(new Set(focusConfig.allowedCategoryIds))
+    : DEFAULT_FOCUS_CONFIG.allowedCategoryIds;
+  const distractionCategoryIds = Array.isArray(focusConfig.distractionCategoryIds)
+    ? Array.from(new Set(focusConfig.distractionCategoryIds))
+    : DEFAULT_FOCUS_CONFIG.distractionCategoryIds;
+
+  return {
+    enabled: Boolean(focusConfig.enabled),
+    allowedCategoryIds,
+    distractionReminderEnabled: Boolean(focusConfig.distractionReminderEnabled),
+    distractionCategoryIds,
+    distractionThresholdMinutes: Math.max(
+      1,
+      Number(focusConfig.distractionThresholdMinutes) || DEFAULT_FOCUS_CONFIG.distractionThresholdMinutes
+    ),
+  };
+}
+
+function createDefaultBehaviorRuntime(runtime = {}) {
+  return {
+    goalNotifications: runtime.goalNotifications || {},
+    distractionNotifications: runtime.distractionNotifications || {},
+    focusNotifications: runtime.focusNotifications || {},
+  };
+}
+
+async function getGoalConfig() {
+  const result = await storageGet("local", GOAL_CONFIG_KEY);
+  return createDefaultGoalConfig(result[GOAL_CONFIG_KEY] || {});
+}
+
+async function setGoalConfig(goalConfig) {
+  await storageSet("local", {
+    [GOAL_CONFIG_KEY]: createDefaultGoalConfig(goalConfig),
+  });
+}
+
+async function getFocusConfig() {
+  const result = await storageGet("local", FOCUS_CONFIG_KEY);
+  return createDefaultFocusConfig(result[FOCUS_CONFIG_KEY] || {});
+}
+
+async function setFocusConfig(focusConfig) {
+  await storageSet("local", {
+    [FOCUS_CONFIG_KEY]: createDefaultFocusConfig(focusConfig),
+  });
+}
+
+async function getBehaviorRuntime() {
+  const result = await storageGet("local", BEHAVIOR_RUNTIME_KEY);
+  return createDefaultBehaviorRuntime(result[BEHAVIOR_RUNTIME_KEY] || {});
+}
+
+async function setBehaviorRuntime(runtime) {
+  await storageSet("local", {
+    [BEHAVIOR_RUNTIME_KEY]: createDefaultBehaviorRuntime(runtime),
+  });
+}
+
+async function persistSegments(session, segments) {
+  if (!segments.length) {
+    return;
+  }
+
+  await withQueuedWrite(async () => {
+    const stats = await readStats();
+
+    for (const segment of segments) {
+      const dailyBucket = stats.daily[segment.dateKey] || {};
+      dailyBucket[session.hostname] = mergeEntry(
+        dailyBucket[session.hostname],
+        segment.seconds,
+        session
+      );
+      stats.daily[segment.dateKey] = dailyBucket;
+
+      const weeklyBucket = stats.weekly[segment.weekKey] || {};
+      weeklyBucket[session.hostname] = mergeEntry(
+        weeklyBucket[session.hostname],
+        segment.seconds,
+        session
+      );
+      stats.weekly[segment.weekKey] = weeklyBucket;
+    }
+
+    await writeStats(stats);
+  });
+}
+
+async function flushSession(endTime) {
+  const session = await getSession();
+  if (!session?.isRunning) {
+    return session;
+  }
+
+  if (endTime <= session.startedAt) {
+    return session;
+  }
+
+  const segments = splitRangeByDateAndWeek(session.startedAt, endTime);
+  await persistSegments(session, segments);
+
+  return {
+    ...session,
+    startedAt: endTime,
+  };
+}
+
+async function pauseSession(endTime) {
+  const updatedSession = await flushSession(endTime);
+  if (!updatedSession) {
+    return;
+  }
+
+  await setSession({
+    ...updatedSession,
+    isRunning: false,
+  });
+}
+
+async function startSessionForTab(tab, startedAt) {
+  const session = createSessionFromTab(tab, startedAt, true);
+  await setSession(session);
+}
+
+async function resumeOrReplaceSession(tab, startedAt) {
+  const currentSession = await getSession();
+  const nextSession = createSessionFromTab(tab, startedAt, true);
+
+  if (!nextSession) {
+    await setSession(null);
+    return;
+  }
+
+  if (
+    currentSession &&
+    currentSession.tabId === nextSession.tabId &&
+    currentSession.url === nextSession.url
+  ) {
+    await setSession({
+      ...currentSession,
+      title: nextSession.title,
+      faviconUrl: nextSession.faviconUrl,
+      isRunning: true,
+      startedAt: currentSession.isRunning ? currentSession.startedAt : startedAt,
+    });
+    return;
+  }
+
+  if (currentSession?.isRunning) {
+    await flushAndReplace(nextSession, startedAt);
+    return;
+  }
+
+  await setSession(nextSession);
+}
+
+async function flushAndReplace(nextSession, endTime) {
+  await flushSession(endTime);
+  await setSession(nextSession);
+}
+
+async function getActiveTabInWindow(windowId) {
+  const tabs = await tabsQuery({ active: true, windowId });
+  return tabs[0] || null;
+}
+
+async function rebuildSessionFromFocusedWindow(startedAt = Date.now()) {
+  try {
+    const tabs = await tabsQuery({ active: true, lastFocusedWindow: true });
+    const tab = tabs[0];
+    if (!tab) {
+      await setSession(null);
+      return;
+    }
+
+    await resumeOrReplaceSession(tab, startedAt);
+  } catch (error) {
+    console.warn("Failed to rebuild session", error);
   }
 }
 
-// Listener for when a tab is activated
-if (typeof chrome.tabs !== "undefined" && chrome.tabs.onActivated) {
-  chrome.tabs.onActivated.addListener(async (activeInfo) => {
-    console.log("Tab activated:", activeInfo.tabId);
-    const now = Date.now();
+function getSessionCategoryId(session, categoryConfig) {
+  if (!session?.hostname) {
+    return "other";
+  }
 
-    // Update time for the previously active tab
-    if (activeTabId !== null && activeTabId !== activeInfo.tabId) {
-      await updateTabTime(activeTabId, now);
+  return categoryConfig.siteCategoryMap[session.hostname] || "other";
+}
+
+function aggregateBucketByCategory(bucket, categoryConfig) {
+  const totals = {};
+
+  for (const [hostname, entry] of Object.entries(bucket || {})) {
+    const categoryId = categoryConfig.siteCategoryMap[hostname] || "other";
+    totals[categoryId] = (totals[categoryId] || 0) + (entry?.seconds || 0);
+  }
+
+  return totals;
+}
+
+function getSessionRuntimeKey(session) {
+  if (!session) {
+    return "";
+  }
+
+  return `${session.tabId}:${session.url}:${session.startedAt}`;
+}
+
+function addRunningSessionTimeToTotals(totals, session, categoryConfig, now) {
+  if (!session?.isRunning || !session.startedAt || now <= session.startedAt) {
+    return totals;
+  }
+
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const effectiveStart = Math.max(session.startedAt, startOfToday.getTime());
+  if (now <= effectiveStart) {
+    return totals;
+  }
+
+  const categoryId = getSessionCategoryId(session, categoryConfig);
+  const nextTotals = { ...totals };
+  nextTotals[categoryId] = (nextTotals[categoryId] || 0) + Math.round((now - effectiveStart) / 1000);
+  return nextTotals;
+}
+
+function pruneRuntimeMapByDate(runtimeMap, keepKey) {
+  const next = {};
+  for (const [key, value] of Object.entries(runtimeMap || {})) {
+    if (key === keepKey) {
+      next[key] = value;
     }
+  }
+  return next;
+}
 
-    activeTabId = activeInfo.tabId;
-    chrome.tabs.get(activeTabId, async (tab) => {
+function pruneRuntimeMapByPrefix(runtimeMap, prefix) {
+  if (!prefix) {
+    return {};
+  }
+
+  const next = {};
+  for (const [key, value] of Object.entries(runtimeMap || {})) {
+    if (key.startsWith(prefix)) {
+      next[key] = value;
+    }
+  }
+  return next;
+}
+
+function createNotification(notificationId, options) {
+  return new Promise((resolve, reject) => {
+    chrome.notifications.create(notificationId, options, (createdId) => {
       if (chrome.runtime.lastError) {
-        console.warn(
-          "Error getting tab info in onActivated:",
-          chrome.runtime.lastError.message
-        );
+        reject(new Error(chrome.runtime.lastError.message));
         return;
       }
-      try {
-        if (tab && tab.url) {
-          tabStartTime[activeTabId] = now;
-          tabUrlMap[activeTabId] = tab.url; // Store full URL for context
-          tabTitleMap[activeTabId] = tab.title || ""; // Store tab title
-          const hostname = getHostnameFromUrl(tab.url);
-          if (
-            hostname &&
-            !tab.url.startsWith("chrome://") &&
-            !tab.url.startsWith("about:")
-          ) {
-            console.log(
-              `Timer started for tab ${activeTabId} (${hostname}) at ${new Date(
-                now
-              ).toLocaleTimeString()}`
-            );
-          } else {
-            console.log(
-              `Timer started for tab ${activeTabId} (URL: ${
-                tab.url
-              }, not logging time) at ${new Date(now).toLocaleTimeString()}`
-            );
-          }
-        }
-      } catch (e) {
-        console.error("Error in onActivated tab callback:", e);
-      }
+      resolve(createdId);
     });
   });
-} else {
-  console.error(
-    "chrome.tabs.onActivated is not available, cannot add listener."
-  );
 }
 
-// Listener for when a tab is updated (e.g., URL changes)
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (tabId === activeTabId && changeInfo.url) {
-    console.log(`Tab ${tabId} URL changed to: ${changeInfo.url}`);
-    const now = Date.now();
-    await updateTabTime(tabId, now); // Log time for the old URL
+async function ensureBehaviorAlarm() {
+  chrome.alarms.create(BEHAVIOR_ALARM_NAME, { periodInMinutes: 1 });
+}
 
-    // Start timer for the new URL
-    if (
-      tab.url &&
-      !tab.url.startsWith("chrome://") &&
-      !tab.url.startsWith("about:")
-    ) {
-      tabStartTime[tabId] = now;
-      tabUrlMap[tabId] = tab.url; // Store full URL
-      const hostname = getHostnameFromUrl(tab.url);
-      if (hostname) {
-        console.log(
-          `Timer restarted for tab ${tabId} (${hostname}) at ${new Date(
-            now
-          ).toLocaleTimeString()}`
-        );
-      } else {
-        console.log(
-          `Timer restarted for tab ${tabId} (URL: ${
-            tab.url
-          }, not logging time) at ${new Date(now).toLocaleTimeString()}`
-        );
+async function evaluateBehaviorRules() {
+  await ensureInitialized();
+
+  const now = Date.now();
+  const [session, stats, categoryConfig, goalConfig, focusConfig, runtime] = await Promise.all([
+    getSession(),
+    readStats(),
+    getCategoryConfig(),
+    getGoalConfig(),
+    getFocusConfig(),
+    getBehaviorRuntime(),
+  ]);
+
+  const nextRuntime = createDefaultBehaviorRuntime(runtime);
+  const todayKey = toDateKey(new Date(now));
+  nextRuntime.goalNotifications = pruneRuntimeMapByDate(nextRuntime.goalNotifications, todayKey);
+
+  if (goalConfig.enabled) {
+    const totals = addRunningSessionTimeToTotals(
+      aggregateBucketByCategory(stats.daily[todayKey], categoryConfig),
+      session,
+      categoryConfig,
+      now
+    );
+    const notifiedGoals = nextRuntime.goalNotifications[todayKey] || {};
+
+    for (const [categoryId, minutes] of Object.entries(goalConfig.categoryGoals)) {
+      if ((totals[categoryId] || 0) < minutes * 60 || notifiedGoals[categoryId]) {
+        continue;
       }
-    } else if (tab.url) {
-      // If it's a chrome internal page, clear start time if it was previously set for a trackable URL
-      delete tabStartTime[tabId];
-      tabUrlMap[tabId] = tab.url;
-      console.log(
-        `Tab ${tabId} URL changed to internal page: ${tab.url}. Timer stopped.`
-      );
+
+      await createNotification(`goal-${todayKey}-${categoryId}`, {
+        type: "basic",
+        iconUrl: "images/icon128.svg",
+        title: "今日目标已达成",
+        message: `你在该分类上的累计时长已经达到 ${minutes} 分钟。`,
+      });
+
+      notifiedGoals[categoryId] = true;
     }
-  } else if (changeInfo.url && tabUrlMap[tabId] !== changeInfo.url) {
-    // If a background tab URL changes, just update its URL mapping
-    tabUrlMap[tabId] = changeInfo.url;
-  }
-});
 
-// Listener for when a tab is closed
-chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
-  console.log("Tab removed:", tabId);
-  const now = Date.now();
-  await updateTabTime(tabId, now);
-  delete tabUrlMap[tabId]; // Clean up URL map
-  if (tabId === activeTabId) {
-    activeTabId = null;
+    nextRuntime.goalNotifications[todayKey] = notifiedGoals;
   }
-});
 
-// Listener for when a window focus changes
-chrome.windows.onFocusChanged.addListener(async (windowId) => {
-  const now = Date.now();
-  if (windowId === chrome.windows.WINDOW_ID_NONE) {
-    // Browser lost focus
-    console.log("Browser lost focus");
-    if (activeTabId !== null) {
-      await updateTabTime(activeTabId, now);
-      // We don't clear activeTabId here, because the tab is still technically active in its window
-      // but we mark its start time as null to indicate it's not currently being timed.
-      delete tabStartTime[activeTabId];
+  if (session?.isRunning) {
+    const sessionKey = getSessionRuntimeKey(session);
+    nextRuntime.focusNotifications = pruneRuntimeMapByPrefix(
+      nextRuntime.focusNotifications,
+      sessionKey
+    );
+    nextRuntime.distractionNotifications = pruneRuntimeMapByPrefix(
+      nextRuntime.distractionNotifications,
+      sessionKey
+    );
+    const categoryId = getSessionCategoryId(session, categoryConfig);
+
+    if (
+      focusConfig.enabled &&
+      !focusConfig.allowedCategoryIds.includes(categoryId) &&
+      !nextRuntime.focusNotifications[sessionKey]
+    ) {
+      await createNotification(`focus-${session.tabId}`, {
+        type: "basic",
+        iconUrl: "images/icon128.svg",
+        title: "专注模式提醒",
+        message: "当前站点不在专注模式允许列表中，建议切回目标任务。",
+      });
+      nextRuntime.focusNotifications = { [sessionKey]: now };
+    }
+
+    if (
+      focusConfig.distractionReminderEnabled &&
+      focusConfig.distractionCategoryIds.includes(categoryId)
+    ) {
+      const elapsedMinutes = Math.floor((now - session.startedAt) / 60000);
+      const threshold = focusConfig.distractionThresholdMinutes;
+      if (elapsedMinutes >= threshold) {
+        const reminderKey = `${sessionKey}:${Math.floor(elapsedMinutes / threshold)}`;
+        if (!nextRuntime.distractionNotifications[reminderKey]) {
+          await createNotification(`distraction-${session.tabId}`, {
+            type: "basic",
+            iconUrl: "images/icon128.svg",
+            title: "分心提醒",
+            message: `你已经在当前分心分类停留约 ${elapsedMinutes} 分钟。`,
+          });
+          nextRuntime.distractionNotifications = {
+            ...nextRuntime.distractionNotifications,
+            [reminderKey]: now,
+          };
+        }
+      }
     }
   } else {
-    // Browser gained focus, find the active tab in the newly focused window
-    console.log("Browser gained focus");
-    chrome.tabs.query({ active: true, windowId: windowId }, async (tabs) => {
-      if (chrome.runtime.lastError) {
-        console.warn(
-          "Error querying tabs in onFocusChanged:",
-          chrome.runtime.lastError.message
-        );
-        return;
-      }
-      try {
-        if (tabs && tabs.length > 0) {
-          const currentFocusedTab = tabs[0];
-          if (activeTabId !== null && activeTabId !== currentFocusedTab.id) {
-            // If there was a previously active tab in another window, log its time.
-            await updateTabTime(activeTabId, now);
-          }
+    nextRuntime.focusNotifications = {};
+    nextRuntime.distractionNotifications = {};
+  }
 
-          activeTabId = currentFocusedTab.id;
-          const fullUrl = tabUrlMap[activeTabId] || currentFocusedTab.url;
-          tabTitleMap[activeTabId] = currentFocusedTab.title || ""; // Store tab title
-          const hostname = getHostnameFromUrl(fullUrl);
+  await setBehaviorRuntime(nextRuntime);
+}
 
-          if (
-            fullUrl &&
-            !fullUrl.startsWith("chrome://") &&
-            !fullUrl.startsWith("about:")
-          ) {
-            if (!tabStartTime[activeTabId]) {
-              // Only start/resume if not already timing this tab
-              tabStartTime[activeTabId] = now;
-              if (!tabUrlMap[activeTabId]) {
-                // If it's a newly focused tab not previously in map
-                tabUrlMap[activeTabId] = fullUrl;
-                console.log(
-                  `Timer started for newly focused tab ${activeTabId} (${hostname}) at ${new Date(
-                    now
-                  ).toLocaleTimeString()}`
-                );
-              } else {
-                console.log(
-                  `Timer resumed for tab ${activeTabId} (${hostname}) at ${new Date(
-                    now
-                  ).toLocaleTimeString()}`
-                );
-              }
-            }
-          } else {
-            // If it's an internal page, ensure no timer is running for it
-            delete tabStartTime[activeTabId];
-            if (fullUrl) tabUrlMap[activeTabId] = fullUrl; // Keep track of its URL though
-            console.log(
-              `Focused tab ${activeTabId} is an internal page (${fullUrl}). Timer not started/resumed.`
-            );
-          }
-        }
-      } catch (e) {
-        console.error("Error in onFocusChanged tab callback:", e);
-      }
+function migrateLegacyStats(legacyDaily, legacyWeekly, legacyMeta) {
+  const stats = createEmptyStats();
+
+  for (const [dateKey, hosts] of Object.entries(legacyDaily || {})) {
+    const bucket = {};
+    for (const [hostname, seconds] of Object.entries(hosts || {})) {
+      const meta = legacyMeta?.[hostname] || {};
+      bucket[hostname] = {
+        seconds: Number(seconds) || 0,
+        lastTitle: meta.title || "",
+        lastUrl: meta.url || "",
+        faviconUrl: meta.faviconUrl || "",
+      };
+    }
+    stats.daily[dateKey] = bucket;
+  }
+
+  for (const [weekKey, hosts] of Object.entries(legacyWeekly || {})) {
+    const bucket = {};
+    for (const [hostname, seconds] of Object.entries(hosts || {})) {
+      const meta = legacyMeta?.[hostname] || {};
+      bucket[hostname] = {
+        seconds: Number(seconds) || 0,
+        lastTitle: meta.title || "",
+        lastUrl: meta.url || "",
+        faviconUrl: meta.faviconUrl || "",
+      };
+    }
+    stats.weekly[weekKey] = bucket;
+  }
+
+  return stats;
+}
+
+async function migrateLegacyDataIfNeeded() {
+  const result = await storageGet("local", [STORAGE_KEY, ...LEGACY_KEYS]);
+  if (result[STORAGE_KEY]) {
+    if (!result[STORAGE_KEY].version) {
+      await writeStats(cloneStats(result[STORAGE_KEY]));
+    }
+    return;
+  }
+
+  const hasLegacyData = LEGACY_KEYS.some((key) => result[key]);
+  if (!hasLegacyData) {
+    await writeStats(createEmptyStats());
+    return;
+  }
+
+  const migratedStats = migrateLegacyStats(
+    result.dailyStats,
+    result.weeklyStats,
+    result.tabMeta
+  );
+  await storageSet("local", { [STORAGE_KEY]: migratedStats });
+  await storageRemove("local", LEGACY_KEYS);
+}
+
+async function ensureCategoryConfig() {
+  const categoryConfig = await getCategoryConfig();
+  await setCategoryConfig(categoryConfig);
+}
+
+async function ensureGoalConfig() {
+  const goalConfig = await getGoalConfig();
+  await setGoalConfig(goalConfig);
+}
+
+async function ensureFocusConfig() {
+  const focusConfig = await getFocusConfig();
+  await setFocusConfig(focusConfig);
+}
+
+async function ensureBehaviorRuntime() {
+  const runtime = await getBehaviorRuntime();
+  await setBehaviorRuntime(runtime);
+}
+
+async function initializeExtensionState() {
+  await migrateLegacyDataIfNeeded();
+  await ensureCategoryConfig();
+  await ensureGoalConfig();
+  await ensureFocusConfig();
+  await ensureBehaviorRuntime();
+  await ensureBehaviorAlarm();
+  await rebuildSessionFromFocusedWindow();
+}
+
+function ensureInitialized() {
+  if (!initializationPromise) {
+    initializationPromise = initializeExtensionState().catch((error) => {
+      initializationPromise = null;
+      throw error;
     });
+  }
+
+  return initializationPromise;
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  ensureInitialized().catch((error) => {
+    console.error("Initialization failed on install", error);
+  });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  ensureInitialized().catch((error) => {
+    console.error("Initialization failed on startup", error);
+  });
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (
+    areaName !== "local" ||
+    (!changes[GOAL_CONFIG_KEY] && !changes[FOCUS_CONFIG_KEY] && !changes[CATEGORY_CONFIG_KEY])
+  ) {
+    return;
+  }
+
+  evaluateBehaviorRules().catch((error) => {
+    console.warn("Failed to re-evaluate behavior rules after config change", error);
+  });
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== BEHAVIOR_ALARM_NAME) {
+    return;
+  }
+
+  evaluateBehaviorRules().catch((error) => {
+    console.warn("Failed to evaluate behavior rules", error);
+  });
+});
+
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  const now = Date.now();
+
+  try {
+    await ensureInitialized();
+    const tab = await tabsGet(activeInfo.tabId);
+    await resumeOrReplaceSession(tab, now);
+  } catch (error) {
+    console.warn("Failed to handle tab activation", error);
   }
 });
 
-// Content script will send messages about page visibility
-chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
-  if (!sender.tab) return; // Ignore messages not from a content script
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (!changeInfo.url && !changeInfo.title && changeInfo.status !== "complete") {
+    return;
+  }
+
+  try {
+    await ensureInitialized();
+    const session = await getSession();
+    if (!session || session.tabId !== tabId) {
+      return;
+    }
+
+    const now = Date.now();
+    const candidateTab = {
+      ...tab,
+      id: tabId,
+      url: changeInfo.url || tab.url || session.url,
+      title: changeInfo.title || tab.title || session.title,
+    };
+
+    if (!isTrackableUrl(candidateTab.url)) {
+      await pauseSession(now);
+      await setSession(null);
+      return;
+    }
+
+    if (candidateTab.url !== session.url) {
+      const nextSession = createSessionFromTab(candidateTab, now, true);
+      await flushAndReplace(nextSession, now);
+      return;
+    }
+
+    await setSession({
+      ...session,
+      title: candidateTab.title || "",
+      faviconUrl: candidateTab.favIconUrl || session.faviconUrl || "",
+    });
+  } catch (error) {
+    console.warn("Failed to handle tab update", error);
+  }
+});
+
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  try {
+    await ensureInitialized();
+    const session = await getSession();
+    if (!session || session.tabId !== tabId) {
+      return;
+    }
+
+    await flushSession(Date.now());
+    await setSession(null);
+  } catch (error) {
+    console.warn("Failed to handle tab removal", error);
+  }
+});
+
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  const now = Date.now();
+
+  try {
+    await ensureInitialized();
+    if (windowId === chrome.windows.WINDOW_ID_NONE) {
+      await pauseSession(now);
+      return;
+    }
+
+    const tab = await getActiveTabInWindow(windowId);
+    if (!tab) {
+      await setSession(null);
+      return;
+    }
+
+    await resumeOrReplaceSession(tab, now);
+  } catch (error) {
+    console.warn("Failed to handle focus change", error);
+  }
+});
+
+chrome.runtime.onMessage.addListener((request, sender) => {
+  if (!sender.tab?.id) {
+    return;
+  }
 
   const tabId = sender.tab.id;
   const now = Date.now();
 
   if (request.type === "PAGE_HIDDEN") {
-    console.log(`Page hidden in tab ${tabId}`);
-    if (tabId === activeTabId && tabStartTime[tabId]) {
-      await updateTabTime(tabId, now);
-      delete tabStartTime[tabId]; // Stop timing, but keep it as activeTabId
-    }
-  } else if (request.type === "PAGE_VISIBLE") {
-    console.log(`Page visible in tab ${tabId}`);
-    if (tabId === activeTabId && !tabStartTime[tabId] && tabUrlMap[tabId]) {
-      const fullUrl = tabUrlMap[tabId];
-      const hostname = getHostnameFromUrl(fullUrl);
-      if (
-        hostname &&
-        fullUrl &&
-        !fullUrl.startsWith("chrome://") &&
-        !fullUrl.startsWith("about:")
-      ) {
-        tabStartTime[tabId] = now;
-        console.log(
-          `Timer resumed for tab ${tabId} (${hostname}) due to visibility change at ${new Date(
-            now
-          ).toLocaleTimeString()}`
-        );
-      } else {
-        console.log(
-          `Page became visible for tab ${tabId} (${fullUrl}), but not resuming timer as it's an internal or invalid URL.`
-        );
-      }
-    }
+    pauseVisibleTab(tabId, now).catch((error) => {
+      console.warn("Failed to pause hidden page", error);
+    });
+  }
+
+  if (request.type === "PAGE_VISIBLE") {
+    resumeVisibleTab(tabId, now, sender.tab).catch((error) => {
+      console.warn("Failed to resume visible page", error);
+    });
   }
 });
 
-console.log("Background script loaded.");
+async function pauseVisibleTab(tabId, now) {
+  await ensureInitialized();
+  const session = await getSession();
+  if (!session || session.tabId !== tabId || !session.isRunning) {
+    return;
+  }
+
+  await pauseSession(now);
+}
+
+async function resumeVisibleTab(tabId, now, senderTab) {
+  await ensureInitialized();
+  const session = await getSession();
+
+  if (!session) {
+    const tab = senderTab.url ? senderTab : await tabsGet(tabId);
+    await startSessionForTab(tab, now);
+    return;
+  }
+
+  if (session.tabId !== tabId) {
+    return;
+  }
+
+  if (session.isRunning) {
+    return;
+  }
+
+  const tab = senderTab.url ? senderTab : await tabsGet(tabId);
+  if (!isTrackableUrl(tab.url || session.url)) {
+    await setSession(null);
+    return;
+  }
+
+  await setSession({
+    ...session,
+    url: tab.url || session.url,
+    hostname: getHostnameFromUrl(tab.url || session.url),
+    title: tab.title || session.title,
+    faviconUrl: tab.favIconUrl || session.faviconUrl || "",
+    startedAt: now,
+    isRunning: true,
+  });
+}
+
+ensureInitialized().catch((error) => {
+  console.error("Initialization failed", error);
+});

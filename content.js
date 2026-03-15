@@ -1,34 +1,50 @@
-// content.js
-console.log('Content script loaded for:', window.location.href);
+let lastSentState = null;
+let initialVisibilityTimer = null;
 
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') {
-    console.log('Page became hidden:', window.location.href);
-    try {
-      chrome.runtime.sendMessage({ type: 'PAGE_HIDDEN' });
-    } catch (e) {
-      console.warn('Extension context invalidated:', e);
-    }
-  } else if (document.visibilityState === 'visible') {
-    console.log('Page became visible:', window.location.href);
-    try {
-      chrome.runtime.sendMessage({ type: 'PAGE_VISIBLE' });
-    } catch (e) {
-      console.warn('Extension context invalidated:', e);
-    }
+function sendVisibilityMessage(type) {
+  if (lastSentState === type) {
+    return;
   }
+
+  lastSentState = type;
+
+  try {
+    chrome.runtime.sendMessage({ type });
+  } catch (error) {
+    console.warn("Extension context invalidated:", error);
+  }
+}
+
+function syncVisibilityState() {
+  if (document.visibilityState === "hidden") {
+    sendVisibilityMessage("PAGE_HIDDEN");
+    return;
+  }
+
+  sendVisibilityMessage("PAGE_VISIBLE");
+}
+
+document.addEventListener("visibilitychange", syncVisibilityState);
+
+window.addEventListener("pagehide", () => {
+  sendVisibilityMessage("PAGE_HIDDEN");
 });
 
-// Inform background script when the page is initially loaded and visible
-// This helps if the content script loads after the tab is already active
-if (document.visibilityState === 'visible') {
-    // Adding a small delay to ensure background script is ready for messages, especially on extension load/reload
-    setTimeout(() => {
-        console.log('Page initially visible:', window.location.href);
-        try {
-          chrome.runtime.sendMessage({ type: 'PAGE_VISIBLE' });
-        } catch (e) {
-          console.warn('Extension context invalidated:', e);
-        }
-    }, 500);
+window.addEventListener("pageshow", () => {
+  syncVisibilityState();
+});
+
+if (document.visibilityState === "visible") {
+  initialVisibilityTimer = setTimeout(() => {
+    syncVisibilityState();
+    initialVisibilityTimer = null;
+  }, 300);
 }
+
+window.addEventListener("beforeunload", () => {
+  if (initialVisibilityTimer) {
+    clearTimeout(initialVisibilityTimer);
+    initialVisibilityTimer = null;
+  }
+  sendVisibilityMessage("PAGE_HIDDEN");
+});

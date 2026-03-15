@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>分类与行为设置</title>
+  <style>
+    :root {
+      --bg: #f3f6fb;
+      --card: #ffffff;
+      --border: #d8e1ee;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --primary: #2563eb;
+      --danger: #dc2626;
+      --success: #15803d;
+      --accent: #0f766e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background: linear-gradient(180deg, #ffffff 0%, var(--bg) 100%);
+    }
+    h1, h2, p { margin: 0; }
+    h1 { margin-bottom: 8px; font-size: 28px; }
+    .subtitle { margin-bottom: 20px; color: var(--muted); }
+    .layout { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(380px, 1fr); gap: 20px; align-items: start; }
+    .stack { display: grid; gap: 20px; }
+    .panel { border: 1px solid var(--border); border-radius: 16px; background: var(--card); box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05); overflow: hidden; }
+    .panel-header { padding: 18px 20px; border-bottom: 1px solid #edf2f7; background: rgba(219, 234, 254, 0.25); }
+    .panel-header p { margin-top: 6px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+    .panel-body { padding: 18px 20px; }
+    .toolbar, .inline-form, .inline-actions, .scene-grid { display: flex; gap: 10px; flex-wrap: wrap; }
+    .inline-actions { margin-top: 14px; }
+    input, select, button, textarea { font: inherit; }
+    input[type="search"], input[type="text"], input[type="number"], input[type="password"], select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      background: #fff;
+      color: var(--text);
+    }
+    button {
+      border: none;
+      border-radius: 10px;
+      padding: 10px 14px;
+      color: #fff;
+      cursor: pointer;
+      background: var(--primary);
+    }
+    button.secondary { background: #475569; }
+    button.danger { background: var(--danger); }
+    button.success { background: var(--success); }
+    button.scene-btn { background: #e2e8f0; color: #334155; }
+    button.scene-btn.active { background: var(--accent); color: #fff; }
+    .site-list, .category-list, .settings-list, .suggestion-list { display: flex; flex-direction: column; gap: 10px; }
+    .site-item, .category-item, .setting-row, .suggestion-item {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 12px;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      background: #fff;
+    }
+    .site-item.active { border-color: var(--primary); background: #eff6ff; }
+    .site-meta, .setting-meta, .suggestion-copy { min-width: 0; flex: 1; }
+    .setting-row { align-items: start; }
+    .setting-row input[type="number"] { width: 108px; min-width: 108px; flex: 0 0 108px; }
+    .site-name, .category-name { font-weight: 600; }
+    .site-subtitle, .category-meta, .empty-state, .status-text, .hint, .suggestion-copy p {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .favicon {
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      object-fit: contain;
+      background: #e2e8f0;
+      flex: 0 0 auto;
+    }
+    .favicon-fallback {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      color: var(--muted);
+    }
+    .details-grid, .form-grid { display: grid; gap: 14px; }
+    .detail-row, .checkbox-grid, .llm-grid { display: grid; gap: 8px; }
+    .llm-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .detail-label { font-size: 13px; color: var(--muted); }
+    .detail-value { word-break: break-all; }
+    .category-actions { display: flex; gap: 8px; margin-left: auto; }
+    .tag { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; background: #e2e8f0; color: #334155; font-size: 12px; }
+    .empty-state { padding: 24px 12px; text-align: center; border: 1px dashed #cbd5e1; border-radius: 12px; }
+    .checkbox-row { display: flex; align-items: center; gap: 8px; }
+    .checkbox-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    @media (max-width: 980px) { .layout, .llm-grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <h1>分类与行为设置</h1>
+  <p class="subtitle">在这里维护站点分类、场景模式、LLM 配置、自动分类建议和专注规则。</p>
+
+  <div class="layout">
+    <section class="panel">
+      <div class="panel-header">
+        <h2>已记录站点</h2>
+        <p>从历史统计中提取站点，支持搜索、手动分类和自动分类建议。</p>
+      </div>
+      <div class="panel-body">
+        <div class="toolbar">
+          <input id="siteSearchInput" type="search" placeholder="搜索域名、标题或 URL">
+        </div>
+        <div id="siteList" class="site-list"></div>
+      </div>
+    </section>
+
+    <div class="stack">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>场景模式</h2>
+          <p>一键切换工作、学习、轻松模式，会同步更新目标和专注规则。</p>
+        </div>
+        <div class="panel-body">
+          <div class="scene-grid">
+            <button id="sceneWorkBtn" class="scene-btn">工作模式</button>
+            <button id="sceneStudyBtn" class="scene-btn">学习模式</button>
+            <button id="sceneRelaxBtn" class="scene-btn">轻松模式</button>
+          </div>
+          <div id="sceneStatusText" class="status-text" style="margin-top: 12px;"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>LLM 配置</h2>
+          <p>这是一套通用配置，当前用于分类建议，后续也会复用到智能总结等能力。</p>
+        </div>
+        <div class="panel-body form-grid">
+          <label class="checkbox-row"><input id="llmEnabledInput" type="checkbox">启用 LLM 能力</label>
+          <div class="llm-grid">
+            <div class="detail-row">
+              <span class="detail-label">Provider</span>
+              <select id="llmProviderSelect">
+                <option value="openai">OpenAI / OpenAI-compatible</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="gemini">Gemini</option>
+                <option value="custom">Custom OpenAI-compatible</option>
+              </select>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">API Base URL</span>
+              <input id="llmApiBaseUrlInput" type="text" placeholder="https://api.openai.com/v1">
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">Model</span>
+              <input id="llmModelInput" type="text" placeholder="gpt-4o-mini">
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">API Key</span>
+              <input id="llmApiKeyInput" type="password" placeholder="sk-...">
+            </div>
+          </div>
+          <div class="llm-grid">
+            <div class="detail-row">
+              <span class="detail-label">Timeout（毫秒）</span>
+              <input id="llmTimeoutInput" type="number" min="3000" step="1000">
+            </div>
+          </div>
+          <div class="llm-grid">
+            <label class="checkbox-row"><input id="llmCategorySuggestionEnabledInput" type="checkbox">启用分类建议增强</label>
+            <label class="checkbox-row"><input id="llmSmartSummaryEnabledInput" type="checkbox">启用智能总结增强</label>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">隐私模式</span>
+            <select id="llmPrivacyModeSelect">
+              <option value="hostname_only">仅发送 hostname</option>
+              <option value="full_context">发送 hostname + title + url</option>
+            </select>
+          </div>
+          <div class="inline-actions">
+            <button id="saveLlmConfigBtn" class="success">保存 LLM 配置</button>
+            <span id="llmStatusText" class="status-text"></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>自动分类建议</h2>
+          <p>本地规则优先，未命中时可选用 LLM 补全建议。建议默认只展示，不会自动写入分类。</p>
+        </div>
+        <div class="panel-body">
+          <div class="inline-actions" style="margin-top: 0;">
+            <button id="applyAllSuggestionsBtn" class="success">应用全部建议</button>
+            <span id="suggestionStatusText" class="status-text"></span>
+          </div>
+          <div id="suggestionList" class="suggestion-list" style="margin-top: 14px;"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>站点分类</h2>
+          <p>选中左侧站点后，为它指定分类。</p>
+        </div>
+        <div class="panel-body">
+          <div id="siteDetailsEmpty" class="empty-state">请选择左侧站点以编辑分类。</div>
+          <div id="siteDetails" class="details-grid" style="display:none;">
+            <div class="detail-row">
+              <span class="detail-label">域名</span>
+              <div id="selectedHostname" class="detail-value"></div>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">最近页面标题</span>
+              <div id="selectedTitle" class="detail-value"></div>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">最近 URL</span>
+              <div id="selectedUrl" class="detail-value"></div>
+            </div>
+            <div class="detail-row">
+              <span class="detail-label">分类</span>
+              <select id="siteCategorySelect"></select>
+            </div>
+            <button id="saveSiteCategoryBtn" class="success">保存分类</button>
+            <div id="siteStatusText" class="status-text"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>分类管理</h2>
+          <p>系统分类固定保留，自定义分类可以新增、重命名和删除。</p>
+        </div>
+        <div class="panel-body">
+          <div class="inline-form" style="margin-bottom: 14px;">
+            <input id="newCategoryInput" type="text" placeholder="输入新分类名称">
+            <button id="addCategoryBtn">新增分类</button>
+          </div>
+          <div id="categoryStatusText" class="status-text" style="margin-bottom: 12px;"></div>
+          <div id="categoryList" class="category-list"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>行为规则</h2>
+          <p>配置每日目标、分心提醒和专注模式。</p>
+        </div>
+        <div class="panel-body form-grid">
+          <div class="detail-row">
+            <label class="checkbox-row"><input id="goalEnabledInput" type="checkbox">启用每日目标</label>
+            <div class="hint">目标按分类统计，达到后会触发浏览器通知。</div>
+          </div>
+          <div id="goalSettingsList" class="settings-list"></div>
+
+          <div class="detail-row">
+            <label class="checkbox-row"><input id="distractionEnabledInput" type="checkbox">启用分心提醒</label>
+            <div class="hint">当你在分心分类停留过久时发出提醒。</div>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">提醒阈值（分钟）</span>
+            <input id="distractionThresholdInput" type="number" min="1" step="1">
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">分心分类</span>
+            <div id="distractionCategories" class="checkbox-grid"></div>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">专注模式允许分类</span>
+            <div id="focusAllowedCategories" class="checkbox-grid"></div>
+          </div>
+
+          <div class="inline-actions">
+            <button id="saveBehaviorBtn" class="success">保存行为规则</button>
+            <span id="behaviorStatusText" class="status-text"></span>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="llm.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

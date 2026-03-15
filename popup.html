@@ -1,140 +1,525 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
-  <title>网页浏览时间统计</title>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>浏览时长统计</title>
   <script src="echarts.min.js"></script>
   <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f7fb;
+      --card: #ffffff;
+      --border: #d9e2ef;
+      --text: #172033;
+      --muted: #64748b;
+      --primary: #2563eb;
+      --primary-soft: #dbeafe;
+      --success: #15803d;
+      --danger: #dc2626;
+      --surface: #f8fbff;
+      --warning: #d97706;
+    }
+
+    * { box-sizing: border-box; }
+
     body {
-      font-family: sans-serif;
-      width: 400px;
-      padding: 10px;
+      width: 430px;
+      margin: 0;
+      padding: 12px;
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at top, #ffffff 0%, var(--bg) 70%);
     }
-    h1, h2 {
+
+    h1, h2, h3, p { margin: 0; }
+    button, input[type="search"] { font: inherit; }
+
+    .panel {
+      margin-bottom: 12px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--card);
+      box-shadow: 0 3px 10px rgba(15, 23, 42, 0.05);
+    }
+
+    .panel-body { padding: 12px; }
+
+    .hero {
+      padding: 14px 14px 12px;
+      background:
+        radial-gradient(circle at top right, rgba(37, 99, 235, 0.14), transparent 42%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(244, 247, 251, 0.92));
+    }
+
+    .hero-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: start;
+    }
+
+    .hero-copy {
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .hero h1 { font-size: 20px; }
+
+    .hero p {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #1e3a8a;
+      background: #dbeafe;
+      white-space: nowrap;
+      flex: 0 0 auto;
+    }
+
+    .status-pill.off {
+      color: #475569;
+      background: #e2e8f0;
+    }
+
+    .button-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .button-row + .button-row { margin-top: 8px; }
+
+    button {
+      border: none;
+      border-radius: 10px;
+      padding: 8px 12px;
+      color: #fff;
+      cursor: pointer;
+      background: #475569;
+      transition: background 0.16s ease;
+    }
+
+    button:hover { background: #334155; }
+
+    button.selected {
+      background: var(--primary);
+      box-shadow: inset 0 0 0 2px #1d4ed8;
+    }
+
+    .button-row.compact {
+      gap: 6px;
+      flex-wrap: nowrap;
+      align-items: center;
+    }
+
+    .button-row.compact button {
+      min-width: 0;
+      flex: 0 1 auto;
+      padding: 8px 10px;
+      white-space: nowrap;
+    }
+
+    .button-row.compact .view-toggle {
+      color: #1e3a8a;
+      background: #e0ecff;
+    }
+
+    .button-row.compact .view-toggle:hover { background: #cfe1ff; }
+
+    .button-row.compact .view-toggle.selected {
+      color: #fff;
+      background: #1d4ed8;
+      box-shadow: inset 0 0 0 2px #1e40af;
+    }
+
+    .toolbar-separator {
+      width: 1px;
+      height: 24px;
+      background: #cbd5e1;
+      flex: 0 0 auto;
+    }
+
+    button.ghost {
+      color: var(--primary);
+      background: var(--primary-soft);
+    }
+
+    button.success { background: var(--success); }
+    button.warning { background: var(--warning); }
+    button.danger { background: var(--danger); }
+
+    .scene-switcher {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+
+    .scene-btn {
+      color: #334155;
+      background: #e2e8f0;
+    }
+
+    .scene-btn.selected {
+      color: #fff;
+      background: #0f766e;
+      box-shadow: inset 0 0 0 2px #115e59;
+    }
+
+    .toolbar-input {
+      flex: 1 1 180px;
+      min-width: 180px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: #fff;
+      color: var(--text);
+    }
+
+    .meta-text {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
       text-align: center;
-      color: #333;
     }
-    .report-section {
-      margin-bottom: 20px;
-      border: 1px solid #ddd;
+
+    .goals-head,
+    .summary-head,
+    .analysis-head,
+    .report-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .goals-head,
+    .summary-head {
+      margin-bottom: 10px;
+    }
+
+    .goals-head h2,
+    .summary-head h2,
+    .analysis-head h2 {
+      font-size: 15px;
+    }
+
+    .goals-head p,
+    .summary-head p,
+    .analysis-head p,
+    .report-header p {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .goal-list,
+    .summary-list,
+    .analysis-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .goal-item,
+    .summary-item,
+    .analysis-item {
       padding: 10px;
-      border-radius: 5px;
-      background-color: #f9f9f9;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      background: var(--surface);
     }
-    .report-section h2 {
-        margin-top: 0;
-        font-size: 1.2em;
-        border-bottom: 1px solid #eee;
-        padding-bottom: 5px;
+
+    .goal-top,
+    .analysis-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      font-size: 12px;
     }
+
+    .goal-name,
+    .analysis-name {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+    }
+
+    .category-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+    }
+
+    .goal-bar {
+      height: 8px;
+      margin-top: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #dbe4ef;
+    }
+
+    .goal-progress {
+      height: 100%;
+      border-radius: 999px;
+    }
+
+    .report-header {
+      padding: 12px 12px 0;
+      align-items: end;
+    }
+
+    .report-header h2 { font-size: 16px; }
+
+    .table-wrap {
+      overflow: hidden;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      background: var(--surface);
+    }
+
     table {
       width: 100%;
       border-collapse: collapse;
+      table-layout: fixed;
     }
+
     th, td {
-      border: 1px solid #ddd;
-      padding: 8px;
+      padding: 9px 8px;
+      border-bottom: 1px solid #e2e8f0;
       text-align: left;
+      vertical-align: middle;
+      font-size: 12px;
     }
+
     th {
-      background-color: #f0f0f0;
+      background: #eff6ff;
+      color: #1e3a8a;
+      font-weight: 600;
     }
-    .no-data {
-        text-align: center;
-        color: #777;
-        padding: 10px;
+
+    tbody tr:last-child td { border-bottom: none; }
+
+    .site-cell,
+    .category-cell {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
     }
-    .controls {
-        text-align: center;
-        margin-bottom: 15px;
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
-        gap: 8px 6px;
+
+    .favicon {
+      width: 16px;
+      height: 16px;
+      border-radius: 4px;
+      background: #dbe4ef;
+      object-fit: contain;
+      flex: 0 0 auto;
     }
-    .controls button {
-        padding: 7px 10px;
-        margin: 0;
-        background-color: #4CAF50;
-        color: white;
-        border: none;
-        border-radius: 3px;
-        cursor: pointer;
-        font-size: 13px;
-        line-height: 1.2;
-        vertical-align: middle;
-        box-sizing: border-box;
-        min-width: 70px;
+
+    .favicon-fallback {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      color: var(--muted);
     }
-    .controls button:hover {
-        background-color: #45a049;
+
+    .site-link {
+      min-width: 0;
+      padding: 0;
+      overflow: hidden;
+      border: none;
+      color: var(--primary);
+      background: transparent;
+      text-align: left;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
-    .controls button.selected {
-      background-color: #2196F3;
-      color: #fff;
-      font-weight: bold;
-      border: 2px solid #1976D2;
+
+    .site-link:disabled {
+      color: var(--text);
+      cursor: default;
     }
-    .controls button.disabled {
-      background-color: #eee;
-      color: #aaa;
-      border: 1px solid #ccc;
-      cursor: not-allowed;
+
+    .muted { color: var(--muted); }
+    .delta-positive { color: var(--success); font-weight: 600; }
+    .delta-negative { color: var(--danger); font-weight: 600; }
+    .delta-neutral { color: var(--muted); font-weight: 600; }
+
+    .empty-state {
+      padding: 18px 12px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
     }
+
+    .chart-card {
+      margin-top: 12px;
+      overflow: hidden;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      background: linear-gradient(180deg, rgba(219, 234, 254, 0.45), rgba(255, 255, 255, 0.92));
+    }
+
+    .chart-card-header { padding: 10px 12px 0; }
+    .chart-card-header h3 { font-size: 13px; }
+    .chart-card-header p {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    .chart { width: 100%; height: 280px; }
+    .chart.secondary { height: 220px; }
   </style>
 </head>
 <body>
-  <h1>浏览时间统计</h1>
-
-  <div class="controls">
-    <div style="display:flex;justify-content:center;gap:8px 6px;margin-bottom:8px;">
-      <button id="todayBtn">今日数据</button>
-      <button id="thisWeekBtn">本周数据</button>
+  <section class="panel hero">
+    <div class="hero-head">
+      <div class="hero-copy">
+        <h1>浏览时长统计</h1>
+        <p>把站点停留记录转成日报、周报、月报、场景模式和专注管理入口。</p>
+      </div>
+      <span id="focusStatusPill" class="status-pill off">专注模式关闭</span>
     </div>
-    <div style="display:flex;justify-content:center;gap:8px 6px;">
-      <button id="prevDayBtn">&lt; 前一天</button>
-      <button id="nextDayBtn">后一天 &gt;</button>
-      <button id="prevWeekBtn">&lt; 上一周</button>
-      <button id="nextWeekBtn">下一周 &gt;</button>
+    <div class="button-row" style="margin-top: 12px;">
+      <button id="toggleFocusModeBtn" class="warning">开启专注模式</button>
+      <button id="openSettingsBtn" class="ghost">打开设置</button>
     </div>
-  </div>
+    <div id="sceneSwitcher" class="scene-switcher">
+      <button id="sceneWorkBtn" class="scene-btn">工作模式</button>
+      <button id="sceneStudyBtn" class="scene-btn">学习模式</button>
+      <button id="sceneRelaxBtn" class="scene-btn">轻松模式</button>
+    </div>
+  </section>
 
-  <div class="report-section" id="dailyReport">
-    <h2 id="dailyReportTitle">每日报告</h2>
-    <table id="dailyTable">
-      <thead>
-        <tr>
-          <th>域名</th>
-          <th>网页标题</th>
-          <th>时长</th>
-        </tr>
-      </thead>
-      <tbody>
-        <!-- Data will be inserted here by JavaScript -->
-      </tbody>
-    </table>
-    <div class="no-data" id="noDailyData">暂无数据</div>
-    <div id="dailyChartContainer" style="width: 100%; height:300px; margin-top:15px;"></div>
-  </div>
+  <section id="goalPanel" class="panel" style="display:none;">
+    <div class="panel-body">
+      <div class="goals-head">
+        <div>
+          <h2>今日目标进度</h2>
+          <p id="goalPanelHint">将分类目标变成可追踪的日常动作。</p>
+        </div>
+      </div>
+      <div id="goalList" class="goal-list"></div>
+    </div>
+  </section>
 
-  <div class="report-section" id="weeklyReport">
-    <h2 id="weeklyReportTitle">每周报告</h2>
-    <table id="weeklyTable">
-      <thead>
-        <tr>
-          <th>域名</th>
-          <th>网页标题</th>
-          <th>时长</th>
-        </tr>
-      </thead>
-      <tbody>
-        <!-- Data will be inserted here by JavaScript -->
-      </tbody>
-    </table>
-    <div class="no-data" id="noWeeklyData">暂无数据</div>
-    <div id="weeklyChartContainer" style="width: 100%; height:300px; margin-top:15px;"></div>
-  </div>
+  <section id="summaryPanel" class="panel">
+    <div class="panel-body">
+      <div class="summary-head">
+        <div>
+          <h2>智能总结</h2>
+          <p id="summaryHint">根据当前报表自动生成高层结论。</p>
+        </div>
+      </div>
+      <div id="summaryList" class="summary-list"></div>
+    </div>
+  </section>
 
+  <section class="panel">
+    <div class="panel-body">
+      <div class="button-row compact">
+        <button id="todayBtn" class="selected">今日报告</button>
+        <button id="thisWeekBtn">本周报告</button>
+        <button id="thisMonthBtn">本月报告</button>
+        <span class="toolbar-separator" aria-hidden="true"></span>
+        <button id="siteViewBtn" class="selected view-toggle">站点视图</button>
+        <button id="categoryViewBtn" class="view-toggle">分类视图</button>
+      </div>
+      <div class="button-row">
+        <button id="prevDayBtn">&lt; 前一天</button>
+        <button id="nextDayBtn">后一天 &gt;</button>
+        <button id="prevWeekBtn">&lt; 上一周</button>
+        <button id="nextWeekBtn">下一周 &gt;</button>
+        <button id="prevMonthBtn">&lt; 上一月</button>
+        <button id="nextMonthBtn">下一月 &gt;</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-body">
+      <div class="button-row">
+        <input id="searchInput" class="toolbar-input" type="search" placeholder="筛选域名、标题、URL 或分类名">
+        <button id="manageCategoriesBtn" class="ghost">分类设置</button>
+      </div>
+      <div class="button-row">
+        <button id="exportJsonBtn" class="success">导出 JSON</button>
+        <button id="exportCsvBtn" class="success">导出 CSV</button>
+        <button id="clearBtn" class="danger">清空统计</button>
+      </div>
+      <p id="lastUpdated" class="meta-text">暂无更新时间</p>
+    </div>
+  </section>
+
+  <section id="analysisCard" class="panel" style="display:none;">
+    <div class="panel-body">
+      <div class="analysis-head">
+        <div>
+          <h2 id="analysisTitle">分类变化分析</h2>
+          <p id="analysisSubtitle">将当前周期和上一周期放在一起看。</p>
+        </div>
+      </div>
+      <div id="analysisList" class="analysis-list"></div>
+      <div id="analysisEmptyState" class="empty-state" style="display:none;">暂无足够数据生成变化分析。</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="report-header">
+      <div>
+        <h2 id="reportTitle">今日报告</h2>
+        <p id="reportSubtitle">按站点查看当前统计。</p>
+      </div>
+    </div>
+    <div class="panel-body">
+      <div class="table-wrap">
+        <table id="reportTable">
+          <thead>
+            <tr id="reportTableHead"></tr>
+          </thead>
+          <tbody id="reportTableBody"></tbody>
+        </table>
+      </div>
+      <div id="emptyState" class="empty-state" style="display:none;">暂无数据</div>
+
+      <section id="primaryChartCard" class="chart-card">
+        <div class="chart-card-header">
+          <h3 id="primaryChartTitle">图表</h3>
+          <p id="primaryChartSubtitle">当前报告的图表概览。</p>
+        </div>
+        <div id="primaryChart" class="chart"></div>
+      </section>
+
+      <section id="secondaryChartCard" class="chart-card" style="display:none;">
+        <div class="chart-card-header">
+          <h3 id="secondaryChartTitle">最近 7 天分类趋势</h3>
+          <p id="secondaryChartSubtitle">观察分类变化，而不是只看单天结果。</p>
+        </div>
+        <div id="secondaryChart" class="chart secondary"></div>
+      </section>
+    </div>
+  </section>
+
+  <script src="llm.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

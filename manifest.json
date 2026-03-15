@@ -1,17 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "网页浏览时间统计",
-  "version": "1.0",
-  "description": "统计用户在浏览器中浏览每个网页的实际停留时间，并可以按日、按周出具统计报表。",
+  "name": "网页浏览时长统计",
+  "version": "2.1.0",
+  "description": "统计用户在浏览器中访问不同网站的实际停留时长，并提供日、周、月报表、场景模式与专注管理能力。",
   "permissions": [
     "tabs",
     "storage",
-    "activeTab",
-    "scripting"
+    "alarms",
+    "notifications"
   ],
   "background": {
     "service_worker": "background.js"
   },
+  "options_page": "options.html",
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

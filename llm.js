@@ -3,17 +3,30 @@
   const LLM_FEATURE_FLAGS_KEY = "llmFeatureFlags";
   const PROVIDERS = {
     openai: "openai",
-    anthropic: "anthropic",
+    deepseek: "deepseek",
     gemini: "gemini",
     custom: "custom",
   };
 
   function createDefaultLLMConfig(config = {}) {
+    // provider 不在白名单（含已移除的旧值 anthropic）时回退到 openai 默认端点
     const provider = Object.values(PROVIDERS).includes(config.provider) ? config.provider : PROVIDERS.openai;
+    let apiBaseUrl = String(config.apiBaseUrl || "").trim();
+
+    // 迁移旧配置：旧 gemini 走原生 generateContent，base 为 …/v1beta；
+    // 现在统一走 OpenAI 兼容层（…/v1beta/openai），把等于旧默认的 base 清空，
+    // 让 resolveBaseUrl 回退到新默认端点，避免旧配置静默 404。
+    if (config.provider === PROVIDERS.gemini) {
+      const normalized = apiBaseUrl.replace(/\/+$/, "");
+      if (!normalized || normalized === "https://generativelanguage.googleapis.com/v1beta") {
+        apiBaseUrl = "";
+      }
+    }
+
     return {
       enabled: Boolean(config.enabled),
       provider,
-      apiBaseUrl: String(config.apiBaseUrl || "").trim(),
+      apiBaseUrl,
       apiKey: String(config.apiKey || "").trim(),
       model: String(config.model || "").trim(),
       timeoutMs: Math.max(3000, Number(config.timeoutMs) || 15000),
@@ -32,8 +45,8 @@
 
   function getDefaultBaseUrl(provider) {
     if (provider === PROVIDERS.openai) return "https://api.openai.com/v1";
-    if (provider === PROVIDERS.anthropic) return "https://api.anthropic.com/v1";
-    if (provider === PROVIDERS.gemini) return "https://generativelanguage.googleapis.com/v1beta";
+    if (provider === PROVIDERS.deepseek) return "https://api.deepseek.com";
+    if (provider === PROVIDERS.gemini) return "https://generativelanguage.googleapis.com/v1beta/openai";
     return "";
   }
 
@@ -210,163 +223,11 @@
     return JSON.parse(content);
   }
 
-  async function requestAnthropicChat(config, payload) {
-    const baseUrl = resolveBaseUrl(config).replace(/\/+$/, "");
-    const data = await fetchJson(
-      `${baseUrl}/messages`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": config.apiKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model: config.model,
-          max_tokens: config.maxTokens,
-          temperature: config.temperature,
-          system: buildSystemPrompt(),
-          messages: [
-            {
-              role: "user",
-              content: JSON.stringify(buildCategoryPromptPayload(config, payload)),
-            },
-          ],
-        }),
-      },
-      config.timeoutMs
-    );
-    const content = data?.content?.find((item) => item.type === "text")?.text;
-    if (!content || typeof content !== "string") {
-      throw new Error("Anthropic response content missing");
-    }
-    return JSON.parse(content);
-  }
-
-  async function requestAnthropicSummary(config, payload) {
-    const baseUrl = resolveBaseUrl(config).replace(/\/+$/, "");
-    const data = await fetchJson(
-      `${baseUrl}/messages`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": config.apiKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model: config.model,
-          max_tokens: config.maxTokens,
-          temperature: config.temperature,
-          system: buildSummarySystemPrompt(),
-          messages: [
-            {
-              role: "user",
-              content: JSON.stringify(buildSummaryPromptPayload(config, payload)),
-            },
-          ],
-        }),
-      },
-      config.timeoutMs
-    );
-    const content = data?.content?.find((item) => item.type === "text")?.text;
-    if (!content || typeof content !== "string") {
-      throw new Error("Anthropic summary content missing");
-    }
-    return JSON.parse(content);
-  }
-
-  async function requestGeminiChat(config, payload) {
-    const baseUrl = resolveBaseUrl(config).replace(/\/+$/, "");
-    const url = `${baseUrl}/models/${encodeURIComponent(config.model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`;
-    const data = await fetchJson(
-      url,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          generationConfig: {
-            temperature: config.temperature,
-            maxOutputTokens: config.maxTokens,
-            responseMimeType: "application/json",
-          },
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  text: `${buildSystemPrompt()}\n${JSON.stringify(buildCategoryPromptPayload(config, payload))}`,
-                },
-              ],
-            },
-          ],
-        }),
-      },
-      config.timeoutMs
-    );
-    const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!content || typeof content !== "string") {
-      throw new Error("Gemini response content missing");
-    }
-    return JSON.parse(content);
-  }
-
-  async function requestGeminiSummary(config, payload) {
-    const baseUrl = resolveBaseUrl(config).replace(/\/+$/, "");
-    const url = `${baseUrl}/models/${encodeURIComponent(config.model)}:generateContent?key=${encodeURIComponent(config.apiKey)}`;
-    const data = await fetchJson(
-      url,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          generationConfig: {
-            temperature: config.temperature,
-            maxOutputTokens: config.maxTokens,
-            responseMimeType: "application/json",
-          },
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  text: `${buildSummarySystemPrompt()}\n${JSON.stringify(buildSummaryPromptPayload(config, payload))}`,
-                },
-              ],
-            },
-          ],
-        }),
-      },
-      config.timeoutMs
-    );
-    const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!content || typeof content !== "string") {
-      throw new Error("Gemini summary content missing");
-    }
-    return JSON.parse(content);
-  }
-
   async function requestStructuredJson(config, payload) {
-    if (config.provider === PROVIDERS.anthropic) {
-      return await requestAnthropicChat(config, payload);
-    }
-    if (config.provider === PROVIDERS.gemini) {
-      return await requestGeminiChat(config, payload);
-    }
     return await requestOpenAIChat(config, payload);
   }
 
   async function requestStructuredSummary(config, payload) {
-    if (config.provider === PROVIDERS.anthropic) {
-      return await requestAnthropicSummary(config, payload);
-    }
-    if (config.provider === PROVIDERS.gemini) {
-      return await requestGeminiSummary(config, payload);
-    }
     return await requestOpenAISummary(config, payload);
   }
 

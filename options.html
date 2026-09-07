@@ -151,18 +151,18 @@
               <span class="detail-label">Provider</span>
               <select id="llmProviderSelect">
                 <option value="openai">OpenAI / OpenAI-compatible</option>
-                <option value="anthropic">Anthropic</option>
-                <option value="gemini">Gemini</option>
-                <option value="custom">Custom OpenAI-compatible</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="gemini">Gemini（OpenAI 兼容）</option>
+                <option value="custom">自定义 OpenAI-compatible endpoint</option>
               </select>
             </div>
             <div class="detail-row">
               <span class="detail-label">API Base URL</span>
-              <input id="llmApiBaseUrlInput" type="text" placeholder="https://api.openai.com/v1">
+              <input id="llmApiBaseUrlInput" type="text" placeholder="https://api.example.com/v1">
             </div>
             <div class="detail-row">
               <span class="detail-label">Model</span>
-              <input id="llmModelInput" type="text" placeholder="gpt-4o-mini">
+              <input id="llmModelInput" type="text" placeholder="gpt-4o-mini / deepseek-chat / gemini-2.0-flash">
             </div>
             <div class="detail-row">
               <span class="detail-label">API Key</span>

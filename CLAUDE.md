@@ -74,7 +74,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 目标达成、专注模式、分心提醒都依赖一个 **`behavior-check` alarm（periodInMinutes: 1）** 定时评估，而不是实时累计触发。每次评估读取 stats + 配置，用 `behaviorRuntime`（local）记录"已发过的通知"来去重；key 会按日期（目标通知）或 session 前缀（`tabId:url:startedAt`，专注/分心通知）裁剪清理，避免同一提醒反复弹出。服务 worker 被杀后 alarm 仍在后台注册。
 
-同一个 **`behavior-check`** alarm 还顺带做**空闲暂停检测（presence/attendance）**：先检查媒体豁免（页面正在播放音/视频，包括静音播放），媒体播放中不暂停；再经 `chrome.idle` 查询系统空闲状态，若系统空闲（且由 `presenceConfig` 控制，默认开、阈值 3 分钟）则调用 `pauseSession` 暂停当前会话。media 豁免优先于系统空闲判断。
+同一个 **`behavior-check`** alarm 还顺带做**空闲暂停检测（presence/attendance）**：先检查媒体豁免（页面正在播放音/视频，包括静音播放），媒体播放中不暂停；再经 `chrome.idle` 查询系统空闲状态，若系统空闲（且由 `presenceConfig` 控制，默认开、阈值 3 分钟）则调用 `pauseSession` 暂停当前会话。media 豁免优先于系统空闲判断。暂停后**同页回看即恢复**：content.js 在页面可见时监听用户输入（点击/滚轮/键盘/触摸，15s 节流）发 `PAGE_ACTIVE`，background 的 `resumeSessionOnInteraction` 仅当该 tab 恰为被暂停的当前 session 时把它重新置为 running（`startedAt` 重置为此刻，暂停空档不计入）。
 
 ## 报表是派生视图
 

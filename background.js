@@ -1035,6 +1035,12 @@ chrome.runtime.onMessage.addListener((request, sender) => {
       console.warn("Failed to resume visible page", error);
     });
   }
+
+  if (request.type === "PAGE_ACTIVE") {
+    resumeSessionOnInteraction(tabId, now, sender.tab).catch((error) => {
+      console.warn("Failed to resume session on page interaction", error);
+    });
+  }
 });
 
 async function pauseVisibleTab(tabId, now) {
@@ -1068,6 +1074,32 @@ async function resumeVisibleTab(tabId, now, senderTab) {
   const tab = senderTab.url ? senderTab : await tabsGet(tabId);
   if (!isTrackableUrl(tab.url || session.url)) {
     await setSession(null);
+    return;
+  }
+
+  await setSession({
+    ...session,
+    url: tab.url || session.url,
+    hostname: getHostnameFromUrl(tab.url || session.url),
+    title: tab.title || session.title,
+    faviconUrl: tab.favIconUrl || session.faviconUrl || "",
+    startedAt: now,
+    isRunning: true,
+  });
+}
+
+async function resumeSessionOnInteraction(tabId, now, senderTab) {
+  await ensureInitialized();
+  const session = await getSession();
+
+  // 只处理"当前正是这个 tab、且因空闲被暂停"的 session——避免把
+  // 已在计时的会话或其它 tab 的交互误当成恢复信号。
+  if (!session || session.tabId !== tabId || session.isRunning) {
+    return;
+  }
+
+  const tab = senderTab.url ? senderTab : await tabsGet(tabId);
+  if (!isTrackableUrl(tab.url || session.url)) {
     return;
   }
 

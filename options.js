@@ -2,6 +2,7 @@ const STORAGE_KEY = "statsV2";
 const CATEGORY_CONFIG_KEY = "categoryConfig";
 const GOAL_CONFIG_KEY = "goalConfig";
 const FOCUS_CONFIG_KEY = "focusConfig";
+const PRESENCE_CONFIG_KEY = "presenceConfig";
 const SCENE_CONFIG_KEY = "sceneConfig";
 
 const {
@@ -72,6 +73,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     goalSettingsList: $("goalSettingsList"),
     distractionEnabledInput: $("distractionEnabledInput"),
     distractionThresholdInput: $("distractionThresholdInput"),
+    presenceEnabledInput: $("presenceEnabledInput"),
+    presenceThresholdSelect: $("presenceThresholdSelect"),
     distractionCategories: $("distractionCategories"),
     focusAllowedCategories: $("focusAllowedCategories"),
     saveBehaviorBtn: $("saveBehaviorBtn"),
@@ -103,6 +106,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     categoryConfig: null,
     goalConfig: null,
     focusConfig: null,
+    presenceConfig: null,
     sceneConfig: null,
     llmConfig: null,
     llmFeatureFlags: null,
@@ -155,6 +159,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       distractionReminderEnabled: Boolean(config.distractionReminderEnabled),
       distractionCategoryIds: Array.isArray(config.distractionCategoryIds) ? Array.from(new Set(config.distractionCategoryIds)) : ["entertainment", "social"],
       distractionThresholdMinutes: Math.max(1, Number(config.distractionThresholdMinutes) || 15),
+    };
+  }
+
+  function createDefaultPresenceConfig(config = {}) {
+    const minutes = [1, 3, 5].includes(Number(config.idleThresholdMinutes))
+      ? Number(config.idleThresholdMinutes)
+      : 3;
+    return {
+      enabled: config.enabled === undefined ? true : Boolean(config.enabled),
+      idleThresholdMinutes: minutes,
     };
   }
 
@@ -381,6 +395,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     }).join("");
   }
 
+  function renderPresenceSettings() {
+    elements.presenceEnabledInput.checked = state.presenceConfig.enabled;
+    elements.presenceThresholdSelect.value = String(state.presenceConfig.idleThresholdMinutes);
+  }
+
   function renderSceneButtons() {
     const map = { work: elements.sceneWorkBtn, study: elements.sceneStudyBtn, relax: elements.sceneRelaxBtn };
     for (const [sceneId, button] of Object.entries(map)) {
@@ -555,9 +574,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       distractionCategoryIds,
       allowedCategoryIds,
     });
-    await storageSet({ [GOAL_CONFIG_KEY]: state.goalConfig, [FOCUS_CONFIG_KEY]: state.focusConfig });
+    state.presenceConfig = createDefaultPresenceConfig({
+      enabled: elements.presenceEnabledInput.checked,
+      idleThresholdMinutes: Number(elements.presenceThresholdSelect.value) || 3,
+    });
+    await storageSet({ [GOAL_CONFIG_KEY]: state.goalConfig, [FOCUS_CONFIG_KEY]: state.focusConfig, [PRESENCE_CONFIG_KEY]: state.presenceConfig });
     elements.behaviorStatusText.textContent = "行为规则已保存。";
     renderBehaviorSettings();
+    renderPresenceSettings();
   }
 
   async function applyScene(sceneId) {
@@ -622,7 +646,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   async function initialize() {
-    const result = await storageGet([STORAGE_KEY, CATEGORY_CONFIG_KEY, GOAL_CONFIG_KEY, FOCUS_CONFIG_KEY, SCENE_CONFIG_KEY, LLM_CONFIG_KEY, LLM_FEATURE_FLAGS_KEY]);
+    const result = await storageGet([STORAGE_KEY, CATEGORY_CONFIG_KEY, GOAL_CONFIG_KEY, FOCUS_CONFIG_KEY, SCENE_CONFIG_KEY, LLM_CONFIG_KEY, LLM_FEATURE_FLAGS_KEY, PRESENCE_CONFIG_KEY]);
     state.stats = normalizeStats(result[STORAGE_KEY] || createEmptyStats());
     state.categoryConfig = createDefaultCategoryConfig(result[CATEGORY_CONFIG_KEY] || {});
     state.goalConfig = createDefaultGoalConfig(result[GOAL_CONFIG_KEY] || {});
@@ -630,6 +654,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.sceneConfig = createDefaultSceneConfig(result[SCENE_CONFIG_KEY] || {});
     state.llmConfig = createDefaultLLMConfig(result[LLM_CONFIG_KEY] || {});
     state.llmFeatureFlags = createDefaultLLMFeatureFlags(result[LLM_FEATURE_FLAGS_KEY] || {});
+    state.presenceConfig = createDefaultPresenceConfig(result[PRESENCE_CONFIG_KEY] || {});
     await storageSet({
       [CATEGORY_CONFIG_KEY]: state.categoryConfig,
       [GOAL_CONFIG_KEY]: state.goalConfig,
@@ -637,12 +662,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       [SCENE_CONFIG_KEY]: state.sceneConfig,
       [LLM_CONFIG_KEY]: state.llmConfig,
       [LLM_FEATURE_FLAGS_KEY]: state.llmFeatureFlags,
+      [PRESENCE_CONFIG_KEY]: state.presenceConfig,
     });
     renderCategorySelect();
     renderCategoryList();
     renderBehaviorSettings();
     renderSceneButtons();
     renderLLMSettings();
+    renderPresenceSettings();
     renderSiteList();
     renderSiteDetails();
     await renderSuggestions();

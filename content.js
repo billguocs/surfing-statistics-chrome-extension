@@ -1,5 +1,6 @@
 let lastSentState = null;
 let initialVisibilityTimer = null;
+let hasActiveMedia = false;
 
 function sendVisibilityMessage(type) {
   if (lastSentState === type) {
@@ -47,4 +48,44 @@ window.addEventListener("beforeunload", () => {
     initialVisibilityTimer = null;
   }
   sendVisibilityMessage("PAGE_HIDDEN");
+});
+
+function syncMediaState() {
+  hasActiveMedia = Array.from(document.querySelectorAll("video, audio")).some(
+    (media) => !media.paused && !media.ended
+  );
+}
+
+function bindMediaTracking() {
+  syncMediaState();
+  document.addEventListener(
+    "play",
+    (event) => {
+      if (event.target instanceof HTMLMediaElement) syncMediaState();
+    },
+    true
+  );
+  document.addEventListener(
+    "pause",
+    (event) => {
+      if (event.target instanceof HTMLMediaElement) syncMediaState();
+    },
+    true
+  );
+  document.addEventListener(
+    "ended",
+    (event) => {
+      if (event.target instanceof HTMLMediaElement) syncMediaState();
+    },
+    true
+  );
+  window.addEventListener("pageshow", syncMediaState);
+}
+
+bindMediaTracking();
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request?.type === "GET_MEDIA_STATE") {
+    sendResponse({ hasActiveMedia });
+  }
 });

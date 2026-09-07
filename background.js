@@ -3,6 +3,7 @@ const SESSION_KEY = "activeSession";
 const CATEGORY_CONFIG_KEY = "categoryConfig";
 const GOAL_CONFIG_KEY = "goalConfig";
 const FOCUS_CONFIG_KEY = "focusConfig";
+const PRESENCE_CONFIG_KEY = "presenceConfig";
 const BEHAVIOR_RUNTIME_KEY = "behaviorRuntime";
 const LEGACY_KEYS = ["dailyStats", "weeklyStats", "tabMeta"];
 const EXCLUDED_PROTOCOLS = ["about:", "chrome:", "chrome-extension:", "edge:"];
@@ -27,6 +28,11 @@ const DEFAULT_FOCUS_CONFIG = {
   distractionReminderEnabled: false,
   distractionCategoryIds: ["entertainment", "social"],
   distractionThresholdMinutes: 15,
+};
+
+const DEFAULT_PRESENCE_CONFIG = {
+  enabled: true,
+  idleThresholdMinutes: 3,
 };
 
 let writeQueue = Promise.resolve();
@@ -342,6 +348,15 @@ function createDefaultFocusConfig(focusConfig = {}) {
   };
 }
 
+function createDefaultPresenceConfig(presenceConfig = {}) {
+  const enabled = presenceConfig.enabled === undefined ? DEFAULT_PRESENCE_CONFIG.enabled : Boolean(presenceConfig.enabled);
+  let minutes = Math.max(1, Number(presenceConfig.idleThresholdMinutes) || DEFAULT_PRESENCE_CONFIG.idleThresholdMinutes);
+  if (![1, 3, 5].includes(minutes)) {
+    minutes = DEFAULT_PRESENCE_CONFIG.idleThresholdMinutes;
+  }
+  return { enabled, idleThresholdMinutes: minutes };
+}
+
 function createDefaultBehaviorRuntime(runtime = {}) {
   return {
     goalNotifications: runtime.goalNotifications || {},
@@ -370,6 +385,15 @@ async function setFocusConfig(focusConfig) {
   await storageSet("local", {
     [FOCUS_CONFIG_KEY]: createDefaultFocusConfig(focusConfig),
   });
+}
+
+async function getPresenceConfig() {
+  const result = await storageGet("local", PRESENCE_CONFIG_KEY);
+  return createDefaultPresenceConfig(result[PRESENCE_CONFIG_KEY] || {});
+}
+
+async function setPresenceConfig(presenceConfig) {
+  await storageSet("local", { [PRESENCE_CONFIG_KEY]: createDefaultPresenceConfig(presenceConfig) });
 }
 
 async function getBehaviorRuntime() {
@@ -587,6 +611,72 @@ function createNotification(notificationId, options) {
   });
 }
 
+function tabsSendMessage(tabId, message) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      if (chrome.runtime.lastError || response === undefined) {
+        resolve(null);
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+async function getHasActiveMedia(session) {
+  if (!session?.tabId) {
+    return false;
+  }
+  const response = await tabsSendMessage(session.tabId, { type: "GET_MEDIA_STATE" });
+  return Boolean(response && response.hasActiveMedia);
+}
+
+function querySystemIdle(thresholdSeconds) {
+  return new Promise((resolve) => {
+    chrome.idle.queryState(thresholdSeconds, (state) => {
+      if (chrome.runtime.lastError) {
+        resolve(false);
+        return;
+      }
+      resolve(state === "idle" || state === "locked");
+    });
+  });
+}
+
+async function evaluatePresence() {
+  const presenceConfig = await getPresenceConfig();
+  if (!presenceConfig.enabled) {
+    return;
+  }
+
+  const session = await getSession();
+  if (!session?.isRunning) {
+    return;
+  }
+
+  let tab;
+  try {
+    tab = await tabsGet(session.tabId);
+  } catch (error) {
+    return;
+  }
+  if (!tab || !tab.url || tab.url !== session.url) {
+    return;
+  }
+
+  const hasActiveMedia = await getHasActiveMedia(session);
+  if (hasActiveMedia) {
+    return;
+  }
+
+  const isIdle = await querySystemIdle(presenceConfig.idleThresholdMinutes * 60);
+  if (!isIdle) {
+    return;
+  }
+
+  await pauseSession(Date.now());
+}
+
 async function ensureBehaviorAlarm() {
   chrome.alarms.create(BEHAVIOR_ALARM_NAME, { periodInMinutes: 1 });
 }
@@ -689,6 +779,10 @@ async function evaluateBehaviorRules() {
   }
 
   await setBehaviorRuntime(nextRuntime);
+
+  await evaluatePresence().catch((error) => {
+    console.warn("Failed to evaluate presence", error);
+  });
 }
 
 function migrateLegacyStats(legacyDaily, legacyWeekly, legacyMeta) {
@@ -769,12 +863,18 @@ async function ensureBehaviorRuntime() {
   await setBehaviorRuntime(runtime);
 }
 
+async function ensurePresenceConfig() {
+  const presenceConfig = await getPresenceConfig();
+  await setPresenceConfig(presenceConfig);
+}
+
 async function initializeExtensionState() {
   await migrateLegacyDataIfNeeded();
   await ensureCategoryConfig();
   await ensureGoalConfig();
   await ensureFocusConfig();
   await ensureBehaviorRuntime();
+  await ensurePresenceConfig();
   await ensureBehaviorAlarm();
   await rebuildSessionFromFocusedWindow();
 }

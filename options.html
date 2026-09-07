@@ -280,6 +280,18 @@
             <span class="detail-label">专注模式允许分类</span>
             <div id="focusAllowedCategories" class="checkbox-grid"></div>
           </div>
+          <div class="detail-row" style="margin-top: 10px;">
+            <label class="checkbox-row"><input id="presenceEnabledInput" type="checkbox">空闲时暂停统计</label>
+            <div class="hint">前台页面无视频/音频播放，且系统空闲超过阈值时，暂停该页面计时（人离开电脑不算浏览）。</div>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">空闲阈值（分钟）</span>
+            <select id="presenceThresholdSelect">
+              <option value="1">1 分钟</option>
+              <option value="3">3 分钟</option>
+              <option value="5">5 分钟</option>
+            </select>
+          </div>
 
           <div class="inline-actions">
             <button id="saveBehaviorBtn" class="success">保存行为规则</button>

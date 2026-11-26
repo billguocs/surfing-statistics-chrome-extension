@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>书签体检</title>
+  <link rel="stylesheet" href="checker.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>书签体检</h1>
+      <p class="sub">扫描链接状态后勾选删除或更新网址；操作前自动备份，可一键撤销。</p>
+    </div>
+    <div class="top-stat" id="bookmarkStat">正在读取书签…</div>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="modes" role="tablist" aria-label="数据来源">
+        <button type="button" class="mode active" data-mode="scan" role="tab" aria-selected="true">扫描全部书签</button>
+        <button type="button" class="mode" data-mode="list" role="tab" aria-selected="false">粘贴 / 导入清单</button>
+      </div>
+
+      <div id="scanPane" class="pane">
+        <p class="hint">
+          用浏览器自己的网络栈检测，自动走当前代理和登录态。
+          404 / 410 记为「失效」；网络错误、403、429、5xx 归入「待确认」，不会默认勾选。
+          被跳转到新地址的链接会标为「可更新」，可以一键把书签改成新网址。
+        </p>
+        <div class="opts">
+          <label>并发 <input id="optConc" type="number" min="1" max="32" value="8"></label>
+          <label>超时(ms) <input id="optTimeout" type="number" min="1000" max="60000" step="500" value="10000"></label>
+          <label class="check"><input id="optCred" type="checkbox"> 携带 Cookie（可检测需登录的页面）</label>
+        </div>
+        <div class="actions">
+          <button type="button" id="btnScan" class="primary">开始扫描</button>
+          <button type="button" id="btnStop" class="secondary" disabled>停止</button>
+          <span class="stat" id="scanStat"></span>
+        </div>
+      </div>
+
+      <div id="listPane" class="pane hidden">
+        <p class="hint">
+          每行一个网址即可；直接粘贴 CSV 或 <code>dead-urls.txt</code> 也能识别。
+          「按清单匹配」不联网，把清单里的网址标为失效；「匹配并重新检测」会再请求一次确认。
+        </p>
+        <textarea id="listInput" spellcheck="false" placeholder="https://example.com/gone-page&#10;https://old.example.org/2019/post"></textarea>
+        <div class="actions">
+          <label class="fileBtn">导入文件<input id="fileInput" type="file" accept=".txt,.csv,text/plain" hidden></label>
+          <button type="button" id="btnMatch" class="primary">按清单匹配</button>
+          <button type="button" id="btnRecheck" class="secondary">匹配并重新检测</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card hidden" id="resultCard">
+      <div class="summary" id="summary"></div>
+      <div class="filters" id="filters"></div>
+
+      <div class="bulk">
+        <label class="check"><input id="chkAll" type="checkbox"> 全选当前列表</label>
+        <label class="check"><input id="optPrune" type="checkbox" checked> 删除后清理空文件夹</label>
+        <button type="button" id="btnUpdate" class="secondary" disabled>更新网址 (0)</button>
+        <button type="button" id="btnDelete" class="danger" disabled>删除选中 (0)</button>
+        <button type="button" id="btnExport" class="secondary">导出结果 CSV</button>
+        <span class="stat" id="deleteStat"></span>
+      </div>
+
+      <div class="tableWrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="colChk"></th>
+              <th class="colStatus">状态</th>
+              <th class="colTitle">标题</th>
+              <th class="colUrl">网址</th>
+              <th class="colFolder">文件夹</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+
+      <details id="unmatchedWrap" class="unmatched hidden">
+        <summary id="unmatchedSummary"></summary>
+        <pre id="unmatchedList"></pre>
+      </details>
+    </section>
+
+    <section class="card undo hidden" id="undoCard">
+      <span id="undoInfo"></span>
+      <button type="button" id="btnUndo" class="primary">撤销上一次删除</button>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="checker.js"></script>
+</body>
+</html>

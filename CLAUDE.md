@@ -74,17 +74,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 目标达成、专注模式、分心提醒都依赖一个 **`behavior-check` alarm（periodInMinutes: 1）** 定时评估，而不是实时累计触发。每次评估读取 stats + 配置，用 `behaviorRuntime`（local）记录"已发过的通知"来去重；key 会按日期（目标通知）或 session 前缀（`tabId:url:startedAt`，专注/分心通知）裁剪清理，避免同一提醒反复弹出。服务 worker 被杀后 alarm 仍在后台注册。
 
-同一个 **`behavior-check`** alarm 还顺带做**空闲暂停检测（presence/attendance）**：先检查媒体豁免（页面正在播放音/视频，包括静音播放），媒体播放中不暂停；再经 `chrome.idle` 查询系统空闲状态，若系统空闲（且由 `presenceConfig` 控制，默认开、阈值 3 分钟）则调用 `pauseSession` 暂停当前会话。media 豁免优先于系统空闲判断。暂停后**同页回看即恢复**：content.js 在页面可见时监听用户输入（点击/滚轮/键盘/触摸，15s 节流）发 `PAGE_ACTIVE`，background 的 `resumeSessionOnInteraction` 仅当该 tab 恰为被暂停的当前 session 时把它重新置为 running（`startedAt` 重置为此刻，暂停空档不计入）。
+同一个 **`behavior-check`** alarm 每分钟结算一次当前会话，并按 `presenceConfig` 检查空闲状态（默认开启，阈值 3 分钟）。系统空闲且前台页面没有播放音视频时，会话先结算再标记为空闲暂停。页面可见时，content.js 将点击、滚轮、键盘和触摸交互节流为 `PAGE_ACTIVE` 消息，间隔至少 15 秒。后台确认消息来自当前聚焦且因空闲暂停的标签页后，从交互时刻重新开始计时。
 
 ## 报表是派生视图
 
-`statsV2` 只存 `daily` 与 `weekly` 桶，**月报、分类视图、趋势、变化分析都是在 popup.js 读取后用 `aggregateMonthBucket`/`aggregateCategoryEntries`/`mergeBuckets` 等纯函数临时聚合**，从不写回存储。`weekly` 的历史周桶会随使用持续累积，没有保留上限或自动清理机制——数据量只增不减。
+统计数据以本地日期和 ISO 周为单位存入 IndexedDB。popup.js 只读取当前报表需要的桶，再聚合月报、分类视图、趋势和变化分析。报表与目标提醒都会计入尚未结算的当前会话时长。
 
 ## 存储键
 
 | 存储位置 | 键名 | 用途 |
 |---------|------|------|
-| local | `statsV2` | 统计数据 {daily, weekly, updatedAt} |
+| IndexedDB | `browsing-statistics` | 日桶、周桶、共享站点元数据和结算标记。升级时从 `statsV2` 等旧键迁移 |
 | local | `categoryConfig` | 分类列表和站点分类映射 |
 | local | `goalConfig` | 每日目标配置 |
 | local | `focusConfig` | 专注模式配置 |
@@ -97,7 +97,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 关键数据流
 
-1. **时长追踪**：content.js 检测可见性 → background.js 更新 session → 按日期/周分割写入 statsV2
+1. **时长追踪**由 content.js 报告页面状态，background.js 串行切换会话，stats.js 把时长按日期和 ISO 周写入 IndexedDB。
 2. **行为规则**：`behavior-check` alarm 每分钟评估目标/专注/分心 → `behaviorRuntime` 去重 → 发通知（详见上文）
 3. **场景切换**：popup/options 把预设 goalConfig+focusConfig 覆盖写入 → storage.onChanged 触发 background 重新评估
 4. **分类建议**：options.js 先运行本地关键词规则，未命中时可选调用 LLM 批量建议

@@ -1,4 +1,6 @@
-const STORAGE_KEY = "statsV2";
+importScripts("stats.js");
+
+const LEGACY_STATS_KEY = "statsV2";
 const SESSION_KEY = "activeSession";
 const CATEGORY_CONFIG_KEY = "categoryConfig";
 const GOAL_CONFIG_KEY = "goalConfig";
@@ -6,7 +8,6 @@ const FOCUS_CONFIG_KEY = "focusConfig";
 const PRESENCE_CONFIG_KEY = "presenceConfig";
 const BEHAVIOR_RUNTIME_KEY = "behaviorRuntime";
 const LEGACY_KEYS = ["dailyStats", "weeklyStats", "tabMeta"];
-const EXCLUDED_PROTOCOLS = ["about:", "chrome:", "chrome-extension:", "edge:"];
 const BEHAVIOR_ALARM_NAME = "behavior-check";
 const DEFAULT_CATEGORIES = [
   { id: "work", name: "工作", system: true },
@@ -30,17 +31,15 @@ const DEFAULT_FOCUS_CONFIG = {
   distractionThresholdMinutes: 15,
 };
 
-const DEFAULT_PRESENCE_CONFIG = {
-  enabled: true,
-  idleThresholdMinutes: 3,
-};
-
-let writeQueue = Promise.resolve();
+let eventQueue = Promise.resolve();
 let initializationPromise = null;
 
 function storageGet(area, keys) {
-  return new Promise((resolve) => {
-    chrome.storage[area].get(keys, resolve);
+  return new Promise((resolve, reject) => {
+    chrome.storage[area].get(keys, (result) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve(result);
+    });
   });
 }
 
@@ -68,18 +67,6 @@ function storageRemove(area, keys) {
   });
 }
 
-function tabsGet(tabId) {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.get(tabId, (tab) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve(tab);
-    });
-  });
-}
-
 function tabsQuery(queryInfo) {
   return new Promise((resolve, reject) => {
     chrome.tabs.query(queryInfo, (tabs) => {
@@ -90,15 +77,6 @@ function tabsQuery(queryInfo) {
       resolve(tabs);
     });
   });
-}
-
-function cloneStats(stats) {
-  return {
-    version: stats?.version || 2,
-    updatedAt: stats?.updatedAt || null,
-    daily: { ...(stats?.daily || {}) },
-    weekly: { ...(stats?.weekly || {}) },
-  };
 }
 
 function createEmptyStats() {
@@ -127,7 +105,7 @@ function createDefaultCategoryConfig(existingConfig = {}) {
 
   const categories = Array.from(categoryMap.values());
   const validCategoryIds = new Set(categories.map((category) => category.id));
-  const siteCategoryMap = {};
+  const siteCategoryMap = Object.create(null);
 
   for (const [hostname, categoryId] of Object.entries(existingMap)) {
     siteCategoryMap[hostname] = validCategoryIds.has(categoryId) ? categoryId : "other";
@@ -139,7 +117,7 @@ function createDefaultCategoryConfig(existingConfig = {}) {
 function isTrackableUrl(url) {
   try {
     const parsedUrl = new URL(url);
-    return !EXCLUDED_PROTOCOLS.includes(parsedUrl.protocol);
+    return Boolean(parsedUrl.hostname) && ["http:", "https:", "ftp:"].includes(parsedUrl.protocol);
   } catch (error) {
     return false;
   }
@@ -151,68 +129,6 @@ function getHostnameFromUrl(url) {
   } catch (error) {
     return "";
   }
-}
-
-function toDateKey(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function getIsoWeekInfo(date) {
-  const utcDate = new Date(
-    Date.UTC(date.getFullYear(), date.getMonth(), date.getDate())
-  );
-  const day = utcDate.getUTCDay() || 7;
-  utcDate.setUTCDate(utcDate.getUTCDate() + 4 - day);
-  const isoYear = utcDate.getUTCFullYear();
-  const yearStart = new Date(Date.UTC(isoYear, 0, 1));
-  const weekNumber = Math.ceil(((utcDate - yearStart) / 86400000 + 1) / 7);
-
-  return {
-    isoYear,
-    weekNumber,
-    weekKey: `${isoYear}-W${String(weekNumber).padStart(2, "0")}`,
-  };
-}
-
-function getNextBoundary(timestamp) {
-  const current = new Date(timestamp);
-  const nextMidnight = new Date(current);
-  nextMidnight.setHours(24, 0, 0, 0);
-
-  const nextWeekStart = new Date(current);
-  const day = nextWeekStart.getDay();
-  const diffToMonday = day === 0 ? 1 : 8 - day;
-  nextWeekStart.setDate(nextWeekStart.getDate() + diffToMonday);
-  nextWeekStart.setHours(0, 0, 0, 0);
-
-  return Math.min(nextMidnight.getTime(), nextWeekStart.getTime());
-}
-
-function splitRangeByDateAndWeek(startTime, endTime) {
-  const segments = [];
-  let segmentStart = startTime;
-
-  while (segmentStart < endTime) {
-    const boundary = getNextBoundary(segmentStart);
-    const segmentEnd = Math.min(boundary, endTime);
-    const durationSeconds = Math.round((segmentEnd - segmentStart) / 1000);
-
-    if (durationSeconds > 0) {
-      const segmentDate = new Date(segmentStart);
-      segments.push({
-        dateKey: toDateKey(segmentDate),
-        weekKey: getIsoWeekInfo(segmentDate).weekKey,
-        seconds: durationSeconds,
-      });
-    }
-
-    segmentStart = segmentEnd;
-  }
-
-  return segments;
 }
 
 function normalizeSession(session) {
@@ -227,13 +143,16 @@ function normalizeSession(session) {
   }
 
   return {
+    id: session.id || JSON.stringify([session.tabId, session.startedAt, session.url]),
     tabId: session.tabId,
+    documentId: session.documentId,
     url: session.url,
     hostname: session.hostname,
     title: session.title || "",
     faviconUrl: session.faviconUrl || "",
     startedAt: session.startedAt,
     isRunning: Boolean(session.isRunning),
+    pauseReason: session.pauseReason,
   };
 }
 
@@ -243,6 +162,7 @@ function createSessionFromTab(tab, startedAt, isRunning = true) {
   }
 
   return {
+    id: crypto.randomUUID(),
     tabId: tab.id,
     url: tab.url,
     hostname: getHostnameFromUrl(tab.url),
@@ -272,44 +192,18 @@ async function setSession(session) {
   });
 }
 
-function mergeEntry(entry, seconds, session) {
-  return {
-    seconds: (entry?.seconds || 0) + seconds,
-    lastTitle: session.title || entry?.lastTitle || "",
-    lastUrl: session.url || entry?.lastUrl || "",
-    faviconUrl: session.faviconUrl || entry?.faviconUrl || "",
-  };
-}
-
-async function withQueuedWrite(task) {
-  writeQueue = writeQueue.then(task, task);
-  return writeQueue;
-}
-
-async function readStats() {
-  const result = await storageGet("local", STORAGE_KEY);
-  return cloneStats(result[STORAGE_KEY] || createEmptyStats());
-}
-
-async function writeStats(stats) {
-  await storageSet("local", {
-    [STORAGE_KEY]: {
-      ...stats,
-      version: 2,
-      updatedAt: new Date().toISOString(),
-    },
+function enqueueEvent(task) {
+  const result = eventQueue.then(async () => {
+    await ensureInitialized();
+    return task();
   });
+  eventQueue = result.catch(() => {});
+  return result;
 }
 
 async function getCategoryConfig() {
   const result = await storageGet("local", CATEGORY_CONFIG_KEY);
   return createDefaultCategoryConfig(result[CATEGORY_CONFIG_KEY] || {});
-}
-
-async function setCategoryConfig(categoryConfig) {
-  await storageSet("local", {
-    [CATEGORY_CONFIG_KEY]: createDefaultCategoryConfig(categoryConfig),
-  });
 }
 
 function createDefaultGoalConfig(goalConfig = {}) {
@@ -348,15 +242,6 @@ function createDefaultFocusConfig(focusConfig = {}) {
   };
 }
 
-function createDefaultPresenceConfig(presenceConfig = {}) {
-  const enabled = presenceConfig.enabled === undefined ? DEFAULT_PRESENCE_CONFIG.enabled : Boolean(presenceConfig.enabled);
-  let minutes = Math.max(1, Number(presenceConfig.idleThresholdMinutes) || DEFAULT_PRESENCE_CONFIG.idleThresholdMinutes);
-  if (![1, 3, 5].includes(minutes)) {
-    minutes = DEFAULT_PRESENCE_CONFIG.idleThresholdMinutes;
-  }
-  return { enabled, idleThresholdMinutes: minutes };
-}
-
 function createDefaultBehaviorRuntime(runtime = {}) {
   return {
     goalNotifications: runtime.goalNotifications || {},
@@ -370,30 +255,9 @@ async function getGoalConfig() {
   return createDefaultGoalConfig(result[GOAL_CONFIG_KEY] || {});
 }
 
-async function setGoalConfig(goalConfig) {
-  await storageSet("local", {
-    [GOAL_CONFIG_KEY]: createDefaultGoalConfig(goalConfig),
-  });
-}
-
 async function getFocusConfig() {
   const result = await storageGet("local", FOCUS_CONFIG_KEY);
   return createDefaultFocusConfig(result[FOCUS_CONFIG_KEY] || {});
-}
-
-async function setFocusConfig(focusConfig) {
-  await storageSet("local", {
-    [FOCUS_CONFIG_KEY]: createDefaultFocusConfig(focusConfig),
-  });
-}
-
-async function getPresenceConfig() {
-  const result = await storageGet("local", PRESENCE_CONFIG_KEY);
-  return createDefaultPresenceConfig(result[PRESENCE_CONFIG_KEY] || {});
-}
-
-async function setPresenceConfig(presenceConfig) {
-  await storageSet("local", { [PRESENCE_CONFIG_KEY]: createDefaultPresenceConfig(presenceConfig) });
 }
 
 async function getBehaviorRuntime() {
@@ -407,127 +271,66 @@ async function setBehaviorRuntime(runtime) {
   });
 }
 
-async function persistSegments(session, segments) {
-  if (!segments.length) {
+async function changeSession(tab, now, { pause = false, documentId, pauseReason = "hidden" } = {}) {
+  const session = await getSession();
+  if (pause) {
+    if (session?.isRunning) {
+      await StatsStore.settle(session, now);
+      await setSession({ ...session, isRunning: false, pauseReason });
+    }
     return;
   }
 
-  await withQueuedWrite(async () => {
-    const stats = await readStats();
-
-    for (const segment of segments) {
-      const dailyBucket = stats.daily[segment.dateKey] || {};
-      dailyBucket[session.hostname] = mergeEntry(
-        dailyBucket[session.hostname],
-        segment.seconds,
-        session
-      );
-      stats.daily[segment.dateKey] = dailyBucket;
-
-      const weeklyBucket = stats.weekly[segment.weekKey] || {};
-      weeklyBucket[session.hostname] = mergeEntry(
-        weeklyBucket[session.hostname],
-        segment.seconds,
-        session
-      );
-      stats.weekly[segment.weekKey] = weeklyBucket;
+  if (session?.isRunning && tab?.id === session.tabId && tab.url === session.url) {
+    const title = tab.title || session.title;
+    const faviconUrl = tab.favIconUrl || session.faviconUrl;
+    const nextDocumentId = documentId || session.documentId;
+    if (title !== session.title || faviconUrl !== session.faviconUrl || nextDocumentId !== session.documentId) {
+      await setSession({ ...session, title, faviconUrl, documentId: nextDocumentId });
     }
-
-    await writeStats(stats);
-  });
+    return;
+  }
+  await StatsStore.settle(session, now);
+  const next = createSessionFromTab(tab, now);
+  if (next && documentId) next.documentId = documentId;
+  await setSession(next);
 }
 
-async function flushSession(endTime) {
-  const session = await getSession();
-  if (!session?.isRunning) {
-    return session;
+async function getFocusedWindowId() {
+  const window = (await chrome.windows.getAll()).find((item) => item.focused);
+  return window?.id;
+}
+
+async function getFocusedTab() {
+  const windowId = await getFocusedWindowId();
+  if (windowId === undefined) return null;
+  const [tab] = await tabsQuery({ active: true, windowId });
+  return tab || null;
+}
+
+async function rebuildSessionFromFocusedWindow(now = Date.now(), { resumePaused = true } = {}) {
+  const tab = await getFocusedTab();
+  if (tab && !resumePaused) {
+    const session = await getSession();
+    if (session?.tabId === tab.id && !session.isRunning && session.url === tab.url) return;
   }
+  await changeSession(tab, now, { pause: !tab });
+}
 
-  if (endTime <= session.startedAt) {
-    return session;
-  }
-
-  const segments = splitRangeByDateAndWeek(session.startedAt, endTime);
-  await persistSegments(session, segments);
-
+async function getReport({ days, weeks }) {
+  const [{ stats, checkpoint }, session] = await Promise.all([StatsStore.read({ days, weeks }), getSession()]);
   return {
-    ...session,
-    startedAt: endTime,
+    stats,
+    session: session && { ...session, startedAt: StatsStore.settledThrough(session, checkpoint) },
   };
 }
 
-async function pauseSession(endTime) {
-  const updatedSession = await flushSession(endTime);
-  if (!updatedSession) {
-    return;
-  }
-
-  await setSession({
-    ...updatedSession,
-    isRunning: false,
-  });
-}
-
-async function startSessionForTab(tab, startedAt) {
-  const session = createSessionFromTab(tab, startedAt, true);
-  await setSession(session);
-}
-
-async function resumeOrReplaceSession(tab, startedAt) {
-  const currentSession = await getSession();
-  const nextSession = createSessionFromTab(tab, startedAt, true);
-
-  if (!nextSession) {
-    await setSession(null);
-    return;
-  }
-
-  if (
-    currentSession &&
-    currentSession.tabId === nextSession.tabId &&
-    currentSession.url === nextSession.url
-  ) {
-    await setSession({
-      ...currentSession,
-      title: nextSession.title,
-      faviconUrl: nextSession.faviconUrl,
-      isRunning: true,
-      startedAt: currentSession.isRunning ? currentSession.startedAt : startedAt,
-    });
-    return;
-  }
-
-  if (currentSession?.isRunning) {
-    await flushAndReplace(nextSession, startedAt);
-    return;
-  }
-
-  await setSession(nextSession);
-}
-
-async function flushAndReplace(nextSession, endTime) {
-  await flushSession(endTime);
-  await setSession(nextSession);
-}
-
-async function getActiveTabInWindow(windowId) {
-  const tabs = await tabsQuery({ active: true, windowId });
-  return tabs[0] || null;
-}
-
-async function rebuildSessionFromFocusedWindow(startedAt = Date.now()) {
-  try {
-    const tabs = await tabsQuery({ active: true, lastFocusedWindow: true });
-    const tab = tabs[0];
-    if (!tab) {
-      await setSession(null);
-      return;
-    }
-
-    await resumeOrReplaceSession(tab, startedAt);
-  } catch (error) {
-    console.warn("Failed to rebuild session", error);
-  }
+async function clearStatistics(now) {
+  const session = await getSession();
+  await StatsStore.clear(session, now);
+  await setSession(session && { ...session, id: crypto.randomUUID(), startedAt: now });
+  await storageRemove("local", BEHAVIOR_RUNTIME_KEY);
+  return {};
 }
 
 function getSessionCategoryId(session, categoryConfig) {
@@ -555,24 +358,6 @@ function getSessionRuntimeKey(session) {
   }
 
   return `${session.tabId}:${session.url}:${session.startedAt}`;
-}
-
-function addRunningSessionTimeToTotals(totals, session, categoryConfig, now) {
-  if (!session?.isRunning || !session.startedAt || now <= session.startedAt) {
-    return totals;
-  }
-
-  const startOfToday = new Date(now);
-  startOfToday.setHours(0, 0, 0, 0);
-  const effectiveStart = Math.max(session.startedAt, startOfToday.getTime());
-  if (now <= effectiveStart) {
-    return totals;
-  }
-
-  const categoryId = getSessionCategoryId(session, categoryConfig);
-  const nextTotals = { ...totals };
-  nextTotals[categoryId] = (nextTotals[categoryId] || 0) + Math.round((now - effectiveStart) / 1000);
-  return nextTotals;
 }
 
 function pruneRuntimeMapByDate(runtimeMap, keepKey) {
@@ -611,100 +396,57 @@ function createNotification(notificationId, options) {
   });
 }
 
-function tabsSendMessage(tabId, message) {
-  return new Promise((resolve) => {
-    chrome.tabs.sendMessage(tabId, message, (response) => {
-      if (chrome.runtime.lastError || response === undefined) {
-        resolve(null);
-        return;
-      }
-      resolve(response);
-    });
-  });
-}
-
-async function getHasActiveMedia(session) {
-  if (!session?.tabId) {
-    return false;
-  }
-  const response = await tabsSendMessage(session.tabId, { type: "GET_MEDIA_STATE" });
-  return Boolean(response && response.hasActiveMedia);
-}
-
-function querySystemIdle(thresholdSeconds) {
-  return new Promise((resolve) => {
-    chrome.idle.queryState(thresholdSeconds, (state) => {
-      if (chrome.runtime.lastError) {
-        resolve(false);
-        return;
-      }
-      resolve(state === "idle" || state === "locked");
-    });
-  });
-}
-
-async function evaluatePresence() {
-  const presenceConfig = await getPresenceConfig();
-  if (!presenceConfig.enabled) {
-    return;
-  }
-
-  const session = await getSession();
-  if (!session?.isRunning) {
-    return;
-  }
-
-  let tab;
-  try {
-    tab = await tabsGet(session.tabId);
-  } catch (error) {
-    return;
-  }
-  if (!tab || !tab.url || tab.url !== session.url) {
-    return;
-  }
-
-  const hasActiveMedia = await getHasActiveMedia(session);
-  if (hasActiveMedia) {
-    return;
-  }
-
-  const isIdle = await querySystemIdle(presenceConfig.idleThresholdMinutes * 60);
-  if (!isIdle) {
-    return;
-  }
-
-  await pauseSession(Date.now());
-}
-
 async function ensureBehaviorAlarm() {
-  chrome.alarms.create(BEHAVIOR_ALARM_NAME, { periodInMinutes: 1 });
+  if (!await chrome.alarms.get(BEHAVIOR_ALARM_NAME)) {
+    await chrome.alarms.create(BEHAVIOR_ALARM_NAME, { periodInMinutes: 1 });
+  }
 }
 
-async function evaluateBehaviorRules() {
-  await ensureInitialized();
+async function pauseIfIdle(session, now) {
+  const result = await storageGet("local", PRESENCE_CONFIG_KEY);
+  const config = result[PRESENCE_CONFIG_KEY] || {};
+  if (config.enabled !== undefined && !config.enabled) return false;
+  const minutes = [1, 3, 5].includes(Number(config.idleThresholdMinutes)) ? Number(config.idleThresholdMinutes) : 3;
+  const idleState = await chrome.idle.queryState(minutes * 60);
+  if (idleState !== "idle" && idleState !== "locked") return false;
 
-  const now = Date.now();
-  const [session, stats, categoryConfig, goalConfig, focusConfig, runtime] = await Promise.all([
+  const media = await chrome.tabs.sendMessage(session.tabId, { type: "GET_MEDIA_STATE" }, { frameId: 0 }).catch(() => null);
+  if (media?.hasActiveMedia) return false;
+
+  await changeSession(null, now, { pause: true, pauseReason: "idle" });
+  return true;
+}
+
+async function checkFocusedSession(now, { checkpoint = false } = {}) {
+  const session = await getSession();
+  if (!session?.isRunning) return;
+  const tab = await getFocusedTab();
+  if (tab?.id !== session.tabId || tab.url !== session.url) {
+    await changeSession(tab, now, { pause: !tab });
+    return;
+  }
+
+  if (!await pauseIfIdle(session, now) && checkpoint) await StatsStore.settle(session, now);
+}
+
+async function evaluateBehaviorRules(now) {
+  const todayKey = StatsStore.dateKey(new Date(now));
+  const [session, categoryConfig, goalConfig, focusConfig, runtime] = await Promise.all([
     getSession(),
-    readStats(),
     getCategoryConfig(),
     getGoalConfig(),
     getFocusConfig(),
     getBehaviorRuntime(),
   ]);
-
+  const previousRuntime = JSON.stringify(runtime);
   const nextRuntime = createDefaultBehaviorRuntime(runtime);
-  const todayKey = toDateKey(new Date(now));
   nextRuntime.goalNotifications = pruneRuntimeMapByDate(nextRuntime.goalNotifications, todayKey);
 
   if (goalConfig.enabled) {
-    const totals = addRunningSessionTimeToTotals(
-      aggregateBucketByCategory(stats.daily[todayKey], categoryConfig),
-      session,
-      categoryConfig,
-      now
-    );
+    const { stats, checkpoint } = await StatsStore.read({ days: [todayKey], weeks: [] });
+    const pending = session && { ...session, startedAt: StatsStore.settledThrough(session, checkpoint) };
+    const liveStats = StatsStore.withActiveSession(stats, pending, now);
+    const totals = aggregateBucketByCategory(liveStats.daily[todayKey], categoryConfig);
     const notifiedGoals = nextRuntime.goalNotifications[todayKey] || {};
 
     for (const [categoryId, minutes] of Object.entries(goalConfig.categoryGoals)) {
@@ -778,18 +520,14 @@ async function evaluateBehaviorRules() {
     nextRuntime.distractionNotifications = {};
   }
 
-  await setBehaviorRuntime(nextRuntime);
-
-  await evaluatePresence().catch((error) => {
-    console.warn("Failed to evaluate presence", error);
-  });
+  if (JSON.stringify(nextRuntime) !== previousRuntime) await setBehaviorRuntime(nextRuntime);
 }
 
 function migrateLegacyStats(legacyDaily, legacyWeekly, legacyMeta) {
   const stats = createEmptyStats();
 
   for (const [dateKey, hosts] of Object.entries(legacyDaily || {})) {
-    const bucket = {};
+    const bucket = Object.create(null);
     for (const [hostname, seconds] of Object.entries(hosts || {})) {
       const meta = legacyMeta?.[hostname] || {};
       bucket[hostname] = {
@@ -803,7 +541,7 @@ function migrateLegacyStats(legacyDaily, legacyWeekly, legacyMeta) {
   }
 
   for (const [weekKey, hosts] of Object.entries(legacyWeekly || {})) {
-    const bucket = {};
+    const bucket = Object.create(null);
     for (const [hostname, seconds] of Object.entries(hosts || {})) {
       const meta = legacyMeta?.[hostname] || {};
       bucket[hostname] = {
@@ -819,64 +557,14 @@ function migrateLegacyStats(legacyDaily, legacyWeekly, legacyMeta) {
   return stats;
 }
 
-async function migrateLegacyDataIfNeeded() {
-  const result = await storageGet("local", [STORAGE_KEY, ...LEGACY_KEYS]);
-  if (result[STORAGE_KEY]) {
-    if (!result[STORAGE_KEY].version) {
-      await writeStats(cloneStats(result[STORAGE_KEY]));
-    }
-    return;
-  }
-
-  const hasLegacyData = LEGACY_KEYS.some((key) => result[key]);
-  if (!hasLegacyData) {
-    await writeStats(createEmptyStats());
-    return;
-  }
-
-  const migratedStats = migrateLegacyStats(
-    result.dailyStats,
-    result.weeklyStats,
-    result.tabMeta
-  );
-  await storageSet("local", { [STORAGE_KEY]: migratedStats });
-  await storageRemove("local", LEGACY_KEYS);
-}
-
-async function ensureCategoryConfig() {
-  const categoryConfig = await getCategoryConfig();
-  await setCategoryConfig(categoryConfig);
-}
-
-async function ensureGoalConfig() {
-  const goalConfig = await getGoalConfig();
-  await setGoalConfig(goalConfig);
-}
-
-async function ensureFocusConfig() {
-  const focusConfig = await getFocusConfig();
-  await setFocusConfig(focusConfig);
-}
-
-async function ensureBehaviorRuntime() {
-  const runtime = await getBehaviorRuntime();
-  await setBehaviorRuntime(runtime);
-}
-
-async function ensurePresenceConfig() {
-  const presenceConfig = await getPresenceConfig();
-  await setPresenceConfig(presenceConfig);
-}
-
 async function initializeExtensionState() {
-  await migrateLegacyDataIfNeeded();
-  await ensureCategoryConfig();
-  await ensureGoalConfig();
-  await ensureFocusConfig();
-  await ensureBehaviorRuntime();
-  await ensurePresenceConfig();
+  await StatsStore.migrate(async () => {
+    const data = await storageGet("local", [LEGACY_STATS_KEY, ...LEGACY_KEYS]);
+    return data[LEGACY_STATS_KEY] || migrateLegacyStats(data.dailyStats, data.weeklyStats, data.tabMeta);
+  });
+  await storageRemove("local", [LEGACY_STATS_KEY, ...LEGACY_KEYS]);
   await ensureBehaviorAlarm();
-  await rebuildSessionFromFocusedWindow();
+  await rebuildSessionFromFocusedWindow(Date.now(), { resumePaused: false });
 }
 
 function ensureInitialized() {
@@ -890,229 +578,94 @@ function ensureInitialized() {
   return initializationPromise;
 }
 
+function scheduleEvent(label, task) {
+  const now = Date.now();
+  return enqueueEvent(() => task(now)).catch((error) => console.warn(label, error));
+}
+
 chrome.runtime.onInstalled.addListener(() => {
-  ensureInitialized().catch((error) => {
-    console.error("Initialization failed on install", error);
-  });
+  scheduleEvent("Initialization failed on install", rebuildSessionFromFocusedWindow);
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  ensureInitialized().catch((error) => {
-    console.error("Initialization failed on startup", error);
-  });
+  scheduleEvent("Initialization failed on startup", rebuildSessionFromFocusedWindow);
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (
-    areaName !== "local" ||
-    (!changes[GOAL_CONFIG_KEY] && !changes[FOCUS_CONFIG_KEY] && !changes[CATEGORY_CONFIG_KEY])
-  ) {
-    return;
-  }
-
-  evaluateBehaviorRules().catch((error) => {
-    console.warn("Failed to re-evaluate behavior rules after config change", error);
+  if (areaName !== "local" ||
+      !(changes[GOAL_CONFIG_KEY] || changes[FOCUS_CONFIG_KEY] || changes[CATEGORY_CONFIG_KEY] || changes[PRESENCE_CONFIG_KEY])) return;
+  return scheduleEvent("Failed to evaluate changed behavior rules", async (now) => {
+    await checkFocusedSession(now);
+    await evaluateBehaviorRules(now);
   });
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name !== BEHAVIOR_ALARM_NAME) {
-    return;
-  }
-
-  evaluateBehaviorRules().catch((error) => {
-    console.warn("Failed to evaluate behavior rules", error);
+  if (alarm.name !== BEHAVIOR_ALARM_NAME) return;
+  return scheduleEvent("Failed to checkpoint or evaluate behavior rules", async (now) => {
+    await checkFocusedSession(now, { checkpoint: true });
+    await evaluateBehaviorRules(now);
   });
 });
 
-chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  const now = Date.now();
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => scheduleEvent("Failed to handle tab activation", async (now) => {
+  if (windowId !== await getFocusedWindowId()) return;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  await changeSession(tab?.windowId === windowId ? tab : null, now);
+}));
 
-  try {
-    await ensureInitialized();
-    const tab = await tabsGet(activeInfo.tabId);
-    await resumeOrReplaceSession(tab, now);
-  } catch (error) {
-    console.warn("Failed to handle tab activation", error);
-  }
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!changeInfo.url && !changeInfo.title && !changeInfo.favIconUrl && changeInfo.status !== "complete") return;
+  return scheduleEvent("Failed to handle tab update", async (now) => {
+    if (!tab.active || tab.windowId !== await getFocusedWindowId()) return;
+    const session = await getSession();
+    if (session?.tabId === tabId && !session.isRunning && !changeInfo.url) return;
+    await changeSession({ ...tab, url: changeInfo.url || tab.url }, now);
+  });
 });
 
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (!changeInfo.url && !changeInfo.title && changeInfo.status !== "complete") {
-    return;
-  }
+chrome.tabs.onRemoved.addListener((tabId) => scheduleEvent("Failed to handle tab removal", async (now) => {
+  const session = await getSession();
+  if (session?.tabId === tabId) await changeSession(null, now);
+}));
 
-  try {
-    await ensureInitialized();
-    const session = await getSession();
-    if (!session || session.tabId !== tabId) {
-      return;
-    }
+chrome.windows.onFocusChanged.addListener((windowId) => scheduleEvent("Failed to handle focus change", async (now) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) await changeSession(null, now, { pause: true });
+  else await rebuildSessionFromFocusedWindow(now);
+}));
 
+chrome.runtime.onMessage.addListener((request, sender, respond) => {
+  if (sender.url?.startsWith(chrome.runtime.getURL(""))) {
     const now = Date.now();
-    const candidateTab = {
-      ...tab,
-      id: tabId,
-      url: changeInfo.url || tab.url || session.url,
-      title: changeInfo.title || tab.title || session.title,
-    };
-
-    if (!isTrackableUrl(candidateTab.url)) {
-      await pauseSession(now);
-      await setSession(null);
-      return;
+    if (request?.type === "GET_STATS" || request?.type === "CLEAR_STATS") {
+      enqueueEvent(() => request.type === "GET_STATS" ? getReport(request) : clearStatistics(now))
+        .then(respond, (error) => respond({ error: error.message }));
+      return true;
     }
+  }
 
-    if (candidateTab.url !== session.url) {
-      const nextSession = createSessionFromTab(candidateTab, now, true);
-      await flushAndReplace(nextSession, now);
-      return;
-    }
-
-    await setSession({
-      ...session,
-      title: candidateTab.title || "",
-      faviconUrl: candidateTab.favIconUrl || session.faviconUrl || "",
+  if (!sender.tab?.id || sender.frameId !== 0) return;
+  if (request?.type === "PAGE_HIDDEN") {
+    scheduleEvent("Failed to pause hidden page", async (now) => {
+      const session = await getSession();
+      if (sender.tab.id === session?.tabId && sender.url === session.url &&
+          (!session.documentId || sender.documentId === session.documentId)) {
+        await changeSession(null, now, { pause: true });
+      }
     });
-  } catch (error) {
-    console.warn("Failed to handle tab update", error);
-  }
-});
-
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-  try {
-    await ensureInitialized();
-    const session = await getSession();
-    if (!session || session.tabId !== tabId) {
-      return;
-    }
-
-    await flushSession(Date.now());
-    await setSession(null);
-  } catch (error) {
-    console.warn("Failed to handle tab removal", error);
-  }
-});
-
-chrome.windows.onFocusChanged.addListener(async (windowId) => {
-  const now = Date.now();
-
-  try {
-    await ensureInitialized();
-    if (windowId === chrome.windows.WINDOW_ID_NONE) {
-      await pauseSession(now);
-      return;
-    }
-
-    const tab = await getActiveTabInWindow(windowId);
-    if (!tab) {
-      await setSession(null);
-      return;
-    }
-
-    await resumeOrReplaceSession(tab, now);
-  } catch (error) {
-    console.warn("Failed to handle focus change", error);
-  }
-});
-
-chrome.runtime.onMessage.addListener((request, sender) => {
-  if (!sender.tab?.id) {
-    return;
-  }
-
-  const tabId = sender.tab.id;
-  const now = Date.now();
-
-  if (request.type === "PAGE_HIDDEN") {
-    pauseVisibleTab(tabId, now).catch((error) => {
-      console.warn("Failed to pause hidden page", error);
-    });
-  }
-
-  if (request.type === "PAGE_VISIBLE") {
-    resumeVisibleTab(tabId, now, sender.tab).catch((error) => {
-      console.warn("Failed to resume visible page", error);
-    });
-  }
-
-  if (request.type === "PAGE_ACTIVE") {
-    resumeSessionOnInteraction(tabId, now, sender.tab).catch((error) => {
-      console.warn("Failed to resume session on page interaction", error);
+  } else if (request?.type === "PAGE_VISIBLE" || request?.type === "PAGE_ACTIVE") {
+    scheduleEvent("Failed to resume visible page", async (now) => {
+      if (request.type === "PAGE_ACTIVE") {
+        const session = await getSession();
+        if (session?.pauseReason !== "idle" || session.tabId !== sender.tab.id || session.url !== sender.url) return;
+      }
+      const tab = await getFocusedTab();
+      if (tab?.id === sender.tab.id && tab.url === sender.url) {
+        await changeSession(tab, now, { documentId: sender.documentId });
+      }
     });
   }
 });
-
-async function pauseVisibleTab(tabId, now) {
-  await ensureInitialized();
-  const session = await getSession();
-  if (!session || session.tabId !== tabId || !session.isRunning) {
-    return;
-  }
-
-  await pauseSession(now);
-}
-
-async function resumeVisibleTab(tabId, now, senderTab) {
-  await ensureInitialized();
-  const session = await getSession();
-
-  if (!session) {
-    const tab = senderTab.url ? senderTab : await tabsGet(tabId);
-    await startSessionForTab(tab, now);
-    return;
-  }
-
-  if (session.tabId !== tabId) {
-    return;
-  }
-
-  if (session.isRunning) {
-    return;
-  }
-
-  const tab = senderTab.url ? senderTab : await tabsGet(tabId);
-  if (!isTrackableUrl(tab.url || session.url)) {
-    await setSession(null);
-    return;
-  }
-
-  await setSession({
-    ...session,
-    url: tab.url || session.url,
-    hostname: getHostnameFromUrl(tab.url || session.url),
-    title: tab.title || session.title,
-    faviconUrl: tab.favIconUrl || session.faviconUrl || "",
-    startedAt: now,
-    isRunning: true,
-  });
-}
-
-async function resumeSessionOnInteraction(tabId, now, senderTab) {
-  await ensureInitialized();
-  const session = await getSession();
-
-  // 只处理"当前正是这个 tab、且因空闲被暂停"的 session——避免把
-  // 已在计时的会话或其它 tab 的交互误当成恢复信号。
-  if (!session || session.tabId !== tabId || session.isRunning) {
-    return;
-  }
-
-  const tab = senderTab.url ? senderTab : await tabsGet(tabId);
-  if (!isTrackableUrl(tab.url || session.url)) {
-    return;
-  }
-
-  await setSession({
-    ...session,
-    url: tab.url || session.url,
-    hostname: getHostnameFromUrl(tab.url || session.url),
-    title: tab.title || session.title,
-    faviconUrl: tab.favIconUrl || session.faviconUrl || "",
-    startedAt: now,
-    isRunning: true,
-  });
-}
 
 ensureInitialized().catch((error) => {
   console.error("Initialization failed", error);

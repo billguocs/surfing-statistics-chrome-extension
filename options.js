@@ -1,4 +1,3 @@
-const STORAGE_KEY = "statsV2";
 const CATEGORY_CONFIG_KEY = "categoryConfig";
 const GOAL_CONFIG_KEY = "goalConfig";
 const FOCUS_CONFIG_KEY = "focusConfig";
@@ -102,7 +101,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const state = {
     searchText: "",
     selectedHostname: "",
-    stats: null,
+    sites: [],
     categoryConfig: null,
     goalConfig: null,
     focusConfig: null,
@@ -111,6 +110,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     llmConfig: null,
     llmFeatureFlags: null,
     suggestionRunId: 0,
+    suggestions: [],
   };
 
   const storageGet = (keys) => new Promise((resolve) => chrome.storage.local.get(keys, resolve));
@@ -124,8 +124,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   });
 
-  const createEmptyStats = () => ({ version: 2, updatedAt: null, daily: {}, weekly: {} });
-  const normalizeStats = (stats) => ({ version: stats?.version || 2, updatedAt: stats?.updatedAt || null, daily: stats?.daily || {}, weekly: stats?.weekly || {} });
   const createDefaultSceneConfig = (config = {}) => ({ activeSceneId: SCENE_PRESETS.some((scene) => scene.id === config.activeSceneId) ? config.activeSceneId : "work" });
 
   function createDefaultCategoryConfig(config = {}) {
@@ -136,7 +134,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     const categories = Array.from(map.values());
     const validIds = new Set(categories.map((category) => category.id));
-    const siteCategoryMap = {};
+    const siteCategoryMap = Object.create(null);
     for (const [hostname, categoryId] of Object.entries(config.siteCategoryMap || {})) {
       siteCategoryMap[hostname] = validIds.has(categoryId) ? categoryId : "other";
     }
@@ -163,12 +161,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   function createDefaultPresenceConfig(config = {}) {
-    const minutes = [1, 3, 5].includes(Number(config.idleThresholdMinutes))
-      ? Number(config.idleThresholdMinutes)
-      : 3;
+    const minutes = Number(config.idleThresholdMinutes);
     return {
       enabled: config.enabled === undefined ? true : Boolean(config.enabled),
-      idleThresholdMinutes: minutes,
+      idleThresholdMinutes: [1, 3, 5].includes(minutes) ? minutes : 3,
     };
   }
 
@@ -209,8 +205,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         });
       }
     };
-    Object.values(stats.daily || {}).forEach(mergeBucket);
     Object.values(stats.weekly || {}).forEach(mergeBucket);
+    Object.values(stats.daily || {}).forEach(mergeBucket);
     return Array.from(siteMap.values()).sort((a, b) => a.hostname.localeCompare(b.hostname));
   }
 
@@ -280,11 +276,18 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   function renderCategorySelect() {
-    elements.siteCategorySelect.innerHTML = state.categoryConfig.categories.map((category) => `<option value="${category.id}">${category.name}</option>`).join("");
+    elements.siteCategorySelect.replaceChildren(...state.categoryConfig.categories.map((category) => new Option(category.name, category.id)));
+  }
+
+  function textElement(tag, className, text) {
+    const element = document.createElement(tag);
+    element.className = className;
+    element.textContent = text;
+    return element;
   }
 
   function renderSiteList() {
-    const sites = filterSites(extractSitesFromStats(state.stats));
+    const sites = filterSites(state.sites);
     elements.siteList.innerHTML = "";
     if (!sites.length) {
       elements.siteList.innerHTML = `<div class="empty-state">当前没有可分类的站点记录。</div>`;
@@ -296,7 +299,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       item.className = `site-item${state.selectedHostname === site.hostname ? " active" : ""}`;
       const meta = document.createElement("div");
       meta.className = "site-meta";
-      meta.innerHTML = `<div class="site-name">${site.hostname}</div><div class="site-subtitle">${getCategoryName(state.categoryConfig.siteCategoryMap[site.hostname] || "other")} · ${site.lastTitle || "暂无标题"}</div>`;
+      const category = getCategoryName(state.categoryConfig.siteCategoryMap[site.hostname] || "other");
+      meta.append(
+        textElement("div", "site-name", site.hostname),
+        textElement("div", "site-subtitle", `${category} · ${site.lastTitle || "暂无标题"}`),
+      );
       item.appendChild(createFavicon(site));
       item.appendChild(meta);
       item.addEventListener("click", () => {
@@ -337,7 +344,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       item.className = "category-item";
       const meta = document.createElement("div");
       meta.className = "site-meta";
-      meta.innerHTML = `<div class="category-name">${category.name}</div><div class="category-meta">${category.system ? "系统分类" : "自定义分类"}</div>`;
+      meta.append(
+        textElement("div", "category-name", category.name),
+        textElement("div", "category-meta", category.system ? "系统分类" : "自定义分类"),
+      );
       item.appendChild(meta);
       if (category.system) {
         const tag = document.createElement("span");
@@ -381,23 +391,40 @@ document.addEventListener("DOMContentLoaded", async () => {
     elements.goalEnabledInput.checked = state.goalConfig.enabled;
     elements.distractionEnabledInput.checked = state.focusConfig.distractionReminderEnabled;
     elements.distractionThresholdInput.value = String(state.focusConfig.distractionThresholdMinutes);
-    elements.goalSettingsList.innerHTML = state.categoryConfig.categories.map((category) => {
-      const value = state.goalConfig.categoryGoals[category.id] || "";
-      return `<div class="setting-row"><div class="setting-meta"><div class="category-name">${category.name}</div><div class="hint">设置该分类的每日目标分钟数。</div></div><input type="number" min="0" step="5" data-goal-category="${category.id}" value="${value}" placeholder="分钟"></div>`;
-    }).join("");
-    elements.distractionCategories.innerHTML = state.categoryConfig.categories.map((category) => {
-      const checked = state.focusConfig.distractionCategoryIds.includes(category.id) ? "checked" : "";
-      return `<label class="checkbox-row"><input type="checkbox" data-distraction-category="${category.id}" ${checked}>${category.name}</label>`;
-    }).join("");
-    elements.focusAllowedCategories.innerHTML = state.categoryConfig.categories.map((category) => {
-      const checked = state.focusConfig.allowedCategoryIds.includes(category.id) ? "checked" : "";
-      return `<label class="checkbox-row"><input type="checkbox" data-focus-category="${category.id}" ${checked}>${category.name}</label>`;
-    }).join("");
-  }
-
-  function renderPresenceSettings() {
     elements.presenceEnabledInput.checked = state.presenceConfig.enabled;
     elements.presenceThresholdSelect.value = String(state.presenceConfig.idleThresholdMinutes);
+    const categories = state.categoryConfig.categories;
+    elements.goalSettingsList.replaceChildren(...categories.map((category) => {
+      const row = document.createElement("div");
+      row.className = "setting-row";
+      const meta = document.createElement("div");
+      meta.className = "setting-meta";
+      meta.append(
+        textElement("div", "category-name", category.name),
+        textElement("div", "hint", "设置该分类的每日目标分钟数。"),
+      );
+      const input = document.createElement("input");
+      input.type = "number";
+      input.min = "0";
+      input.step = "5";
+      input.value = state.goalConfig.categoryGoals[category.id] || "";
+      input.dataset.goalCategory = category.id;
+      input.placeholder = "分钟";
+      row.append(meta, input);
+      return row;
+    }));
+    const checkboxRows = (key, checkedIds) => categories.map((category) => {
+      const label = document.createElement("label");
+      label.className = "checkbox-row";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.dataset[key] = category.id;
+      input.checked = checkedIds.includes(category.id);
+      label.append(input, document.createTextNode(category.name));
+      return label;
+    });
+    elements.distractionCategories.replaceChildren(...checkboxRows("distractionCategory", state.focusConfig.distractionCategoryIds));
+    elements.focusAllowedCategories.replaceChildren(...checkboxRows("focusCategory", state.focusConfig.allowedCategoryIds));
   }
 
   function renderSceneButtons() {
@@ -434,8 +461,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     if (!state.llmConfig.enabled || !state.llmFeatureFlags.categorySuggestionEnabled || !llmCandidates.length) {
-      return localSuggestions;
+      return { suggestions: localSuggestions };
     }
+
+    const validationError = validateLLMSettings(state.llmConfig);
+    if (validationError) return { suggestions: localSuggestions, status: validationError };
 
     try {
       const llmResults = await requestCategorySuggestions(state.llmConfig, {
@@ -468,37 +498,28 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     } catch (error) {
       console.warn("LLM batch suggestion failed", error);
-      throw error;
+      return { suggestions: localSuggestions, status: formatLLMError(error) };
     }
 
-    return localSuggestions;
+    return { suggestions: localSuggestions };
   }
 
   async function renderSuggestions() {
     const runId = ++state.suggestionRunId;
-    const sites = filterSites(extractSitesFromStats(state.stats));
-    const validationError = validateLLMSettings(state.llmConfig);
-    if (validationError) {
-      elements.suggestionList.innerHTML = `<div class="empty-state">${validationError}</div>`;
-      elements.suggestionStatusText.textContent = "LLM 配置未完成，当前仅建议先补齐配置。";
-      return;
-    }
+    const sites = filterSites(state.sites);
+    state.suggestions = [];
+    elements.applyAllSuggestionsBtn.disabled = true;
     elements.suggestionStatusText.textContent = "";
     elements.suggestionList.innerHTML = `<div class="empty-state">正在生成分类建议...</div>`;
-    let suggestions = [];
-    try {
-      suggestions = await buildSuggestionBatch(sites.slice(0, 12));
-    } catch (error) {
-      if (runId !== state.suggestionRunId) return;
-      elements.suggestionList.innerHTML = `<div class="empty-state">本地规则运行失败，请检查控制台日志。</div>`;
-      elements.suggestionStatusText.textContent = formatLLMError(error);
-      return;
-    }
+    const { suggestions, status } = await buildSuggestionBatch(sites.slice(0, 12));
     if (runId !== state.suggestionRunId) return;
+    state.suggestions = suggestions;
+    elements.applyAllSuggestionsBtn.disabled = !suggestions.length;
+    elements.suggestionStatusText.textContent = status || "";
     elements.suggestionList.innerHTML = "";
     if (!suggestions.length) {
       elements.suggestionList.innerHTML = `<div class="empty-state">当前没有可应用的自动分类建议。</div>`;
-      if (state.llmConfig.enabled && state.llmFeatureFlags.categorySuggestionEnabled) {
+      if (!status && state.llmConfig.enabled && state.llmFeatureFlags.categorySuggestionEnabled) {
         elements.suggestionStatusText.textContent = "没有生成新的建议，可能是本地规则已覆盖或当前分类已匹配。";
       }
       return;
@@ -508,7 +529,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       item.className = "suggestion-item";
       const copy = document.createElement("div");
       copy.className = "suggestion-copy";
-      copy.innerHTML = `<div class="site-name">${site.hostname}</div><p>建议分类：${suggestion.suggestedCategoryName} · 来源：${suggestion.source === "llm" ? "LLM" : "本地规则"}</p><p>${suggestion.reason}</p><p>置信度：${Math.round((suggestion.confidence || 0) * 100)}%</p>`;
+      copy.append(
+        textElement("div", "site-name", site.hostname),
+        textElement("p", "", `建议分类：${suggestion.suggestedCategoryName} · 来源：${suggestion.source === "llm" ? "LLM" : "本地规则"}`),
+        textElement("p", "", suggestion.reason),
+        textElement("p", "", `置信度：${Math.round((suggestion.confidence || 0) * 100)}%`),
+      );
       const applyButton = document.createElement("button");
       applyButton.type = "button";
       applyButton.className = "success";
@@ -576,12 +602,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
     state.presenceConfig = createDefaultPresenceConfig({
       enabled: elements.presenceEnabledInput.checked,
-      idleThresholdMinutes: Number(elements.presenceThresholdSelect.value) || 3,
+      idleThresholdMinutes: elements.presenceThresholdSelect.value,
     });
-    await storageSet({ [GOAL_CONFIG_KEY]: state.goalConfig, [FOCUS_CONFIG_KEY]: state.focusConfig, [PRESENCE_CONFIG_KEY]: state.presenceConfig });
+    await storageSet({
+      [GOAL_CONFIG_KEY]: state.goalConfig,
+      [FOCUS_CONFIG_KEY]: state.focusConfig,
+      [PRESENCE_CONFIG_KEY]: state.presenceConfig,
+    });
     elements.behaviorStatusText.textContent = "行为规则已保存。";
     renderBehaviorSettings();
-    renderPresenceSettings();
   }
 
   async function applyScene(sceneId) {
@@ -624,52 +653,34 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   async function applyAllSuggestions() {
-    const sites = filterSites(extractSitesFromStats(state.stats));
-    let suggestions = [];
-    try {
-      suggestions = await buildSuggestionBatch(sites.slice(0, 12));
-    } catch (error) {
-      elements.suggestionStatusText.textContent = formatLLMError(error);
-      return;
-    }
-    let applied = 0;
+    const suggestions = state.suggestions;
+    if (!suggestions.length) return;
+    elements.applyAllSuggestionsBtn.disabled = true;
     for (const { site, suggestion } of suggestions) {
       state.categoryConfig.siteCategoryMap[site.hostname] = suggestion.suggestedCategoryId;
-      applied += 1;
-    }
-    if (!applied) {
-      elements.suggestionStatusText.textContent = "当前没有可应用的建议。";
-      return;
     }
     await persistCategoryConfig("已批量应用分类建议。");
-    elements.suggestionStatusText.textContent = `已应用 ${applied} 条分类建议。`;
+    elements.suggestionStatusText.textContent = `已应用 ${suggestions.length} 条分类建议。`;
   }
 
   async function initialize() {
-    const result = await storageGet([STORAGE_KEY, CATEGORY_CONFIG_KEY, GOAL_CONFIG_KEY, FOCUS_CONFIG_KEY, SCENE_CONFIG_KEY, LLM_CONFIG_KEY, LLM_FEATURE_FLAGS_KEY, PRESENCE_CONFIG_KEY]);
-    state.stats = normalizeStats(result[STORAGE_KEY] || createEmptyStats());
+    const [result, { stats }] = await Promise.all([
+      storageGet([CATEGORY_CONFIG_KEY, GOAL_CONFIG_KEY, FOCUS_CONFIG_KEY, SCENE_CONFIG_KEY, LLM_CONFIG_KEY, LLM_FEATURE_FLAGS_KEY, PRESENCE_CONFIG_KEY]),
+      StatsStore.request("GET_STATS"),
+    ]);
+    state.sites = extractSitesFromStats(stats);
     state.categoryConfig = createDefaultCategoryConfig(result[CATEGORY_CONFIG_KEY] || {});
     state.goalConfig = createDefaultGoalConfig(result[GOAL_CONFIG_KEY] || {});
     state.focusConfig = createDefaultFocusConfig(result[FOCUS_CONFIG_KEY] || {});
+    state.presenceConfig = createDefaultPresenceConfig(result[PRESENCE_CONFIG_KEY] || {});
     state.sceneConfig = createDefaultSceneConfig(result[SCENE_CONFIG_KEY] || {});
     state.llmConfig = createDefaultLLMConfig(result[LLM_CONFIG_KEY] || {});
     state.llmFeatureFlags = createDefaultLLMFeatureFlags(result[LLM_FEATURE_FLAGS_KEY] || {});
-    state.presenceConfig = createDefaultPresenceConfig(result[PRESENCE_CONFIG_KEY] || {});
-    await storageSet({
-      [CATEGORY_CONFIG_KEY]: state.categoryConfig,
-      [GOAL_CONFIG_KEY]: state.goalConfig,
-      [FOCUS_CONFIG_KEY]: state.focusConfig,
-      [SCENE_CONFIG_KEY]: state.sceneConfig,
-      [LLM_CONFIG_KEY]: state.llmConfig,
-      [LLM_FEATURE_FLAGS_KEY]: state.llmFeatureFlags,
-      [PRESENCE_CONFIG_KEY]: state.presenceConfig,
-    });
     renderCategorySelect();
     renderCategoryList();
     renderBehaviorSettings();
     renderSceneButtons();
     renderLLMSettings();
-    renderPresenceSettings();
     renderSiteList();
     renderSiteDetails();
     await renderSuggestions();

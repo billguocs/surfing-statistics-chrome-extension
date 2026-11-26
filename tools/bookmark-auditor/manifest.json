@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "书签体检 · Bookmark Auditor",
+  "version": "1.0.0",
+  "description": "扫描书签链接是否失效，预览后批量删除，可一键撤销。",
+  "permissions": ["bookmarks", "storage"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "书签体检"
+  }
+}

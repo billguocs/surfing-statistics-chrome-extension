@@ -1,4 +1,3 @@
-const STORAGE_KEY = "statsV2";
 const SESSION_KEY = "activeSession";
 const CATEGORY_CONFIG_KEY = "categoryConfig";
 const GOAL_CONFIG_KEY = "goalConfig";
@@ -125,10 +124,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     activeView: VIEW_TYPES.SITE,
     currentDate: new Date(),
     currentWeekDate: new Date(),
-    currentMonthDate: new Date(),
+    currentMonthDate: StatsStore.shiftMonth(new Date(), 0),
     filterText: "",
     charts: { primary: null, secondary: null },
     summaryRunId: 0,
+    summaryIsLocal: true,
+    summaryCache: new Map(),
+    reportRunId: 0,
+    reportPending: false,
+    hasRunningSession: false,
   };
 
   const storageGet = (area, keys) => new Promise((resolve) => chrome.storage[area].get(keys, resolve));
@@ -141,38 +145,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       resolve();
     });
   });
-  const storageRemove = (area, keys) => new Promise((resolve, reject) => {
-    chrome.storage[area].remove(keys, () => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve();
-    });
-  });
-
-  const createEmptyStats = () => ({ version: 2, updatedAt: null, daily: {}, weekly: {} });
-  const normalizeStats = (stats) => ({
-    version: stats?.version || 2,
-    updatedAt: stats?.updatedAt || null,
-    daily: stats?.daily || {},
-    weekly: stats?.weekly || {},
-  });
   const pad = (value) => String(value).padStart(2, "0");
-  const formatDate = (date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  const formatDate = StatsStore.dateKey;
   const formatShortDate = (date) => `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
   const formatMonthKey = (date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
   const formatMonthLabel = (date) => `${date.getFullYear()} 年 ${pad(date.getMonth() + 1)} 月`;
 
-  function getIsoWeekKey(date) {
-    const utcDate = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-    const day = utcDate.getUTCDay() || 7;
-    utcDate.setUTCDate(utcDate.getUTCDate() + 4 - day);
-    const isoYear = utcDate.getUTCFullYear();
-    const yearStart = new Date(Date.UTC(isoYear, 0, 1));
-    const weekNumber = Math.ceil(((utcDate - yearStart) / 86400000 + 1) / 7);
-    return `${isoYear}-W${pad(weekNumber)}`;
-  }
+  const getIsoWeekKey = StatsStore.weekKey;
 
   function formatUpdatedAt(timestamp) {
     if (!timestamp) return "暂无更新时间";
@@ -181,6 +160,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   function formatDuration(seconds) {
+    seconds = Math.floor(seconds);
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     const rest = seconds % 60;
@@ -221,7 +201,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       : [];
     const mergedCategories = [...categories, ...customCategories];
     const validIds = new Set(mergedCategories.map((item) => item.id));
-    const siteCategoryMap = {};
+    const siteCategoryMap = Object.create(null);
     for (const [hostname, categoryId] of Object.entries(config.siteCategoryMap || {})) {
       siteCategoryMap[hostname] = validIds.has(categoryId) ? categoryId : "other";
     }
@@ -260,7 +240,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   function mergeBuckets(buckets) {
-    const merged = {};
+    const merged = Object.create(null);
     for (const bucket of buckets) {
       for (const [hostname, value] of Object.entries(bucket || {})) {
         const current = merged[hostname] || { seconds: 0, lastTitle: "", lastUrl: "", faviconUrl: "" };
@@ -280,6 +260,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     return mergeBuckets(
       Object.entries(stats.daily)
         .filter(([dateKey]) => dateKey.startsWith(monthKey))
+        .sort(([first], [second]) => first.localeCompare(second))
         .map(([, bucket]) => bucket)
     );
   }
@@ -347,7 +328,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   function buildAnalysisEntries(currentSiteEntries, previousSiteEntries, categoryConfig) {
     const currentTotals = aggregateCategoryTotals(currentSiteEntries, categoryConfig);
     const previousTotals = aggregateCategoryTotals(previousSiteEntries, categoryConfig);
-    return Array.from(Object.keys(currentTotals))
+    return [...new Set([...Object.keys(currentTotals), ...Object.keys(previousTotals)])]
       .map((categoryId) => {
         const category = getCategoryById(categoryConfig, categoryId);
         const currentSeconds = currentTotals[categoryId] || 0;
@@ -361,7 +342,6 @@ document.addEventListener("DOMContentLoaded", async () => {
           deltaSeconds: currentSeconds - previousSeconds,
         };
       })
-      .filter((entry) => entry.currentSeconds > 0)
       .sort((a, b) => Math.abs(b.deltaSeconds) - Math.abs(a.deltaSeconds));
   }
 
@@ -388,9 +368,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       date.setDate(date.getDate() - 7);
       return stats.weekly[getIsoWeekKey(date)] || {};
     }
-    const date = new Date(state.currentMonthDate);
-    date.setMonth(date.getMonth() - 1);
-    return aggregateMonthBucket(stats, date);
+    return aggregateMonthBucket(stats, StatsStore.shiftMonth(state.currentMonthDate, -1));
   }
 
   function getSummaryBucket(stats, reportType, date) {
@@ -576,29 +554,29 @@ document.addEventListener("DOMContentLoaded", async () => {
     };
   }
 
-  async function renderEnhancedSummary(currentSiteEntries, categoryEntries, analysisEntries, sceneConfig, llmConfig, llmFeatureFlags) {
-    renderSummary(currentSiteEntries, categoryEntries, analysisEntries, sceneConfig);
-    if (!currentSiteEntries.length) {
-      state.summaryRunId += 1;
-      return;
+  async function renderEnhancedSummary(runId, payload, llmConfig) {
+    const key = JSON.stringify([llmConfig, payload]);
+    let cached = state.summaryCache.get(key);
+    if (!cached || cached.retryAt <= Date.now()) {
+      cached = { retryAt: Infinity };
+      cached.promise = requestSmartSummary(llmConfig, payload).catch((error) => {
+        cached.retryAt = Date.now() + 30000;
+        throw error;
+      });
+      state.summaryCache.set(key, cached);
+      if (state.summaryCache.size > 16) state.summaryCache.delete(state.summaryCache.keys().next().value);
     }
-    if (!llmConfig.enabled || !llmFeatureFlags.smartSummaryEnabled) {
-      state.summaryRunId += 1;
-      return;
-    }
-
-    const runId = ++state.summaryRunId;
     const localHint = elements.summaryHint.textContent;
     elements.summaryHint.textContent = `${localHint} LLM 增强生成中...`;
     try {
-      const items = await requestSmartSummary(llmConfig, buildSummaryPayload(currentSiteEntries, categoryEntries, analysisEntries, sceneConfig));
-      if (runId !== state.summaryRunId || !items.length) return;
-      renderSummaryItems(`${localHint} · LLM 增强`, items);
+      const items = await cached.promise;
+      if (runId !== state.summaryRunId) return;
+      if (items.length) renderSummaryItems(`${localHint} · LLM 增强`, items);
+      else elements.summaryHint.textContent = localHint;
     } catch (error) {
       if (runId !== state.summaryRunId) return;
       console.warn("Smart summary enhancement failed", error);
-      renderSummary(currentSiteEntries, categoryEntries, analysisEntries, sceneConfig);
-      elements.summaryHint.textContent = `${elements.summaryHint.textContent} · 已回退到本地总结`;
+      elements.summaryHint.textContent = `${localHint} · 已回退到本地总结`;
     }
   }
 
@@ -653,75 +631,76 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   function renderPrimaryChart(entries) {
-    disposeChart("primary");
     if (!entries.length) {
+      disposeChart("primary");
       elements.primaryChartCard.style.display = "none";
       return;
     }
     elements.primaryChartCard.style.display = "block";
-    state.charts.primary = echarts.init(elements.primaryChart);
+    state.charts.primary ||= echarts.init(elements.primaryChart);
+    const updateChart = (option) => state.charts.primary.setOption(option, { notMerge: true });
     if (state.activeView === VIEW_TYPES.SITE && state.activeReport === REPORT_TYPES.DAILY) {
       const total = entries.reduce((sum, entry) => sum + entry.seconds, 0);
       const chartEntries = entries.length > DAILY_TOP_LIMIT ? [...entries.slice(0, DAILY_TOP_LIMIT), { hostname: "其他", seconds: entries.slice(DAILY_TOP_LIMIT).reduce((sum, entry) => sum + entry.seconds, 0) }] : entries;
-      state.charts.primary.setOption({
-        tooltip: { trigger: "item", formatter: (params) => `${params.name}<br>${formatDuration(params.value)}<br>${params.percent}%` },
+      updateChart({
+        tooltip: { trigger: "item", formatter: (params) => `${escapeHtml(params.name)}<br>${formatDuration(params.value)}<br>${params.percent}%` },
         series: [{ type: "pie", roseType: "radius", radius: [24, 104], center: ["50%", "56%"], itemStyle: { borderColor: "#fff", borderWidth: 2, borderRadius: 8 }, label: { formatter: (params) => `${params.name}\n${total ? Math.round((params.value / total) * 100) : 0}%` }, data: chartEntries.map((entry) => ({ name: entry.hostname, value: entry.seconds })) }],
       });
       return;
     }
     if (state.activeView === VIEW_TYPES.SITE && state.activeReport === REPORT_TYPES.WEEKLY) {
-      state.charts.primary.setOption({
-        tooltip: { trigger: "item", formatter: (params) => `${params.name}: ${formatDuration(params.value)}` },
+      updateChart({
+        tooltip: { trigger: "item", formatter: (params) => `${escapeHtml(params.name)}: ${formatDuration(params.value)}` },
         series: [{ type: "treemap", data: entries.map((entry) => ({ name: entry.hostname, value: entry.seconds })), breadcrumb: { show: false }, leafDepth: 1, label: { show: true, formatter: (params) => `${params.name}\n${formatDuration(params.value)}` } }],
       });
       return;
     }
     if (state.activeView === VIEW_TYPES.SITE && state.activeReport === REPORT_TYPES.MONTHLY) {
       const ranked = entries.slice(0, MONTHLY_TOP_LIMIT).reverse();
-      state.charts.primary.setOption({
+      updateChart({
         grid: { top: 16, right: 18, bottom: 24, left: 96 },
         xAxis: { type: "value", axisLabel: { formatter: (value) => `${Math.round(value / 3600)}h` } },
         yAxis: { type: "category", data: ranked.map((entry) => entry.hostname) },
-        tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, formatter: (params) => `${params[0].name}<br>${formatDuration(params[0].value)}` },
+        tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, formatter: (params) => `${escapeHtml(params[0].name)}<br>${formatDuration(params[0].value)}` },
         series: [{ type: "bar", data: ranked.map((entry) => entry.seconds), itemStyle: { color: "#2563eb", borderRadius: [0, 8, 8, 0] }, label: { show: true, position: "right", formatter: (params) => formatDuration(params.value) } }],
       });
       return;
     }
     if (state.activeView === VIEW_TYPES.CATEGORY && state.activeReport === REPORT_TYPES.DAILY) {
-      state.charts.primary.setOption({
-        tooltip: { trigger: "item", formatter: (params) => `${params.name}<br>${formatDuration(params.value)}<br>${params.percent}%` },
+      updateChart({
+        tooltip: { trigger: "item", formatter: (params) => `${escapeHtml(params.name)}<br>${formatDuration(params.value)}<br>${params.percent}%` },
         series: [{ type: "pie", radius: ["42%", "70%"], center: ["50%", "43%"], data: entries.map((entry) => ({ name: entry.categoryName, value: entry.seconds, itemStyle: { color: entry.color } })) }],
       });
       return;
     }
     const ranked = entries.slice(0, 8).reverse();
-    state.charts.primary.setOption({
+    updateChart({
       grid: { top: 16, right: 18, bottom: 24, left: 74 },
       xAxis: { type: "value", axisLabel: { formatter: (value) => `${Math.round(value / 60)}分` } },
       yAxis: { type: "category", data: ranked.map((entry) => entry.categoryName) },
-      tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, formatter: (params) => `${params[0].name}<br>${formatDuration(params[0].value)}` },
+      tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, formatter: (params) => `${escapeHtml(params[0].name)}<br>${formatDuration(params[0].value)}` },
       series: [{ type: "bar", data: ranked.map((entry) => ({ value: entry.seconds, itemStyle: { color: entry.color } })), label: { show: true, position: "right", formatter: (params) => formatDuration(params.value) } }],
     });
   }
 
   function renderTrendChart(trend) {
-    disposeChart("secondary");
     const shouldShow = state.activeView === VIEW_TYPES.CATEGORY;
     if (!shouldShow || !trend.series.length) {
+      disposeChart("secondary");
       elements.secondaryChartCard.style.display = "none";
       return;
     }
     elements.secondaryChartCard.style.display = "block";
-    state.charts.secondary = echarts.init(elements.secondaryChart);
+    state.charts.secondary ||= echarts.init(elements.secondaryChart);
     state.charts.secondary.setOption({
       color: trend.categories.map((category) => category.color),
-      tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, formatter: (params) => [params[0]?.axisValue || "", ...params.map((item) => `${item.seriesName}: ${formatDuration(item.value)}`)].join("<br>") },
+      tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, formatter: (params) => [escapeHtml(params[0]?.axisValue || ""), ...params.map((item) => `${escapeHtml(item.seriesName)}: ${formatDuration(item.value)}`)].join("<br>") },
       legend: { bottom: 0 },
       grid: { top: 20, right: 12, bottom: 42, left: 28 },
       xAxis: { type: "category", data: trend.labels },
       yAxis: { type: "value", axisLabel: { formatter: (value) => `${Math.round(value / 60)}分` } },
       series: trend.series.map((series) => ({ name: series.name, type: "bar", stack: "total", data: series.data })),
-    });
+    }, { notMerge: true });
   }
 
   function setSummaryTexts(stats) {
@@ -770,10 +749,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     elements.nextMonthBtn.style.display = showMonthly ? "inline-flex" : "none";
   }
 
-  async function loadContext() {
-    const result = await storageGet("local", [STORAGE_KEY, CATEGORY_CONFIG_KEY, GOAL_CONFIG_KEY, FOCUS_CONFIG_KEY, SCENE_CONFIG_KEY, LLM_CONFIG_KEY, LLM_FEATURE_FLAGS_KEY]);
+  async function loadSettings() {
+    const result = await storageGet("local", [CATEGORY_CONFIG_KEY, GOAL_CONFIG_KEY, FOCUS_CONFIG_KEY, SCENE_CONFIG_KEY, LLM_CONFIG_KEY, LLM_FEATURE_FLAGS_KEY]);
     return {
-      stats: normalizeStats(result[STORAGE_KEY] || createEmptyStats()),
       categoryConfig: defaultCategoryConfig(result[CATEGORY_CONFIG_KEY] || {}),
       goalConfig: defaultGoalConfig(result[GOAL_CONFIG_KEY] || {}),
       focusConfig: defaultFocusConfig(result[FOCUS_CONFIG_KEY] || {}),
@@ -781,6 +759,35 @@ document.addEventListener("DOMContentLoaded", async () => {
       llmConfig: defaultLLMConfig(result[LLM_CONFIG_KEY] || {}),
       llmFeatureFlags: defaultLLMFeatureFlags(result[LLM_FEATURE_FLAGS_KEY] || {}),
     };
+  }
+
+  function selectedReportRange() {
+    const today = new Date();
+    const days = [formatDate(today)];
+    const weeks = [];
+    let trendEnd = state.currentDate;
+    if (state.activeReport === REPORT_TYPES.DAILY) {
+      days.push(formatDate(state.currentDate), formatDate(StatsStore.shiftDay(state.currentDate, -1)));
+    } else if (state.activeReport === REPORT_TYPES.WEEKLY) {
+      const date = state.currentWeekDate;
+      weeks.push(getIsoWeekKey(date), getIsoWeekKey(StatsStore.shiftDay(date, -7)));
+      trendEnd = StatsStore.shiftDay(date, (7 - date.getDay()) % 7);
+    } else {
+      const start = StatsStore.shiftMonth(state.currentMonthDate, -1);
+      const end = StatsStore.shiftMonth(state.currentMonthDate, 1);
+      for (let date = start; date < end; date = StatsStore.shiftDay(date, 1)) days.push(formatDate(date));
+      trendEnd = StatsStore.shiftDay(end, -1);
+    }
+    if (trendEnd > today) trendEnd = today;
+    if (state.activeView === VIEW_TYPES.CATEGORY) {
+      for (let offset = 0; offset < 7; offset += 1) days.push(formatDate(StatsStore.shiftDay(trendEnd, -offset)));
+    }
+    return { days, weeks, trendEnd };
+  }
+
+  async function statisticsForExport() {
+    const { stats, session } = await StatsStore.request("GET_STATS");
+    return StatsStore.withActiveSession(stats, session);
   }
 
   async function applyScene(sceneId) {
@@ -808,8 +815,28 @@ document.addEventListener("DOMContentLoaded", async () => {
     return { today: createSummary(today), thisWeek: createSummary(week), thisMonth: createSummary(month) };
   }
 
-  async function renderActiveReport() {
-    const { stats, categoryConfig, goalConfig, focusConfig, sceneConfig, llmConfig, llmFeatureFlags } = await loadContext();
+  async function renderActiveReport({ refreshSummary = true } = {}) {
+    const runId = ++state.reportRunId;
+    const summaryRunId = refreshSummary ? ++state.summaryRunId : state.summaryRunId;
+    const { days, weeks, trendEnd } = selectedReportRange();
+    state.reportPending = true;
+    let report, settings;
+    try {
+      [report, settings] = await Promise.all([StatsStore.request("GET_STATS", { days, weeks }), loadSettings()]);
+    } catch (error) {
+      if (runId !== state.reportRunId) return;
+      console.warn("Failed to load report", error);
+      elements.emptyState.style.display = "block";
+      elements.emptyState.textContent = "读取统计失败，请关闭弹窗后重试。";
+      return;
+    } finally {
+      if (runId === state.reportRunId) state.reportPending = false;
+    }
+    if (runId !== state.reportRunId) return;
+    const { categoryConfig, goalConfig, focusConfig, sceneConfig, llmConfig, llmFeatureFlags } = settings;
+    const { stats: recordedStats, session } = report;
+    state.hasRunningSession = Boolean(session?.isRunning);
+    const stats = StatsStore.withActiveSession(recordedStats, session);
     renderFocusStatus(focusConfig, sceneConfig);
     renderSceneButtons(sceneConfig);
     renderGoalProgress(goalConfig, categoryConfig, stats);
@@ -819,15 +846,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     const rawSiteEntries = normalizeSiteEntries(getCurrentBucket(stats));
     const previousSiteEntries = normalizeSiteEntries(getPreviousBucket(stats));
     const siteEntries = filterSiteEntries(rawSiteEntries);
-    const categoryEntries = filterCategoryEntries(aggregateCategoryEntries(rawSiteEntries, categoryConfig));
+    const rawCategoryEntries = aggregateCategoryEntries(rawSiteEntries, categoryConfig);
+    const categoryEntries = filterCategoryEntries(rawCategoryEntries);
     const analysisEntries = buildAnalysisEntries(rawSiteEntries, previousSiteEntries, categoryConfig);
-    const trend = buildCategoryTrend(
-      stats,
-      categoryConfig,
-      state.activeReport === REPORT_TYPES.DAILY ? state.currentDate : state.activeReport === REPORT_TYPES.WEEKLY ? state.currentWeekDate : state.currentMonthDate
-    );
-
-    await renderEnhancedSummary(rawSiteEntries, aggregateCategoryEntries(rawSiteEntries, categoryConfig), analysisEntries, sceneConfig, llmConfig, llmFeatureFlags);
+    const recordedSites = refreshSummary && llmConfig.enabled && llmFeatureFlags.smartSummaryEnabled
+      ? normalizeSiteEntries(getCurrentBucket(recordedStats))
+      : [];
+    if (refreshSummary) state.summaryIsLocal = !recordedSites.length;
+    if (refreshSummary || state.summaryIsLocal) renderSummary(rawSiteEntries, rawCategoryEntries, analysisEntries, sceneConfig);
+    if (recordedSites.length) {
+      const recordedCategories = aggregateCategoryEntries(recordedSites, categoryConfig);
+      const recordedAnalysis = buildAnalysisEntries(
+        recordedSites, normalizeSiteEntries(getPreviousBucket(recordedStats)), categoryConfig
+      );
+      void renderEnhancedSummary(summaryRunId, buildSummaryPayload(recordedSites, recordedCategories, recordedAnalysis, sceneConfig), llmConfig);
+    }
 
     const viewEntries = state.activeView === VIEW_TYPES.SITE ? siteEntries : categoryEntries;
     elements.emptyState.style.display = viewEntries.length ? "none" : "block";
@@ -845,7 +878,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.activeView === VIEW_TYPES.SITE ? renderSiteTable(siteEntries) : renderCategoryTable(categoryEntries);
     renderAnalysis(analysisEntries);
     renderPrimaryChart(viewEntries);
-    renderTrendChart(trend);
+    renderTrendChart(state.activeView === VIEW_TYPES.CATEGORY ? buildCategoryTrend(stats, categoryConfig, trendEnd) : null);
   }
 
   function downloadTextFile(filename, content, type) {
@@ -859,7 +892,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   async function exportJson() {
-    const { stats, categoryConfig, goalConfig, focusConfig, sceneConfig } = await loadContext();
+    const [stats, { categoryConfig, goalConfig, focusConfig, sceneConfig }] = await Promise.all([statisticsForExport(), loadSettings()]);
     const payload = {
       exportedAt: new Date().toISOString(),
       version: 4,
@@ -874,13 +907,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   async function exportCsv() {
-    const { stats, categoryConfig } = await loadContext();
+    const [stats, { categoryConfig }] = await Promise.all([statisticsForExport(), loadSettings()]);
     const lines = [["date", "category_id", "category_name", "hostname", "title", "url", "seconds", "hours"].join(",")];
     for (const [dateKey, bucket] of Object.entries(stats.daily).sort(([a], [b]) => a.localeCompare(b))) {
       for (const [hostname, entry] of Object.entries(bucket || {}).sort(([a], [b]) => a.localeCompare(b))) {
         const categoryId = categoryConfig.siteCategoryMap[hostname] || "other";
         const category = getCategoryById(categoryConfig, categoryId);
-        const cells = [dateKey, categoryId, category.name, hostname, entry?.lastTitle || "", entry?.lastUrl || "", entry?.seconds || 0, ((entry?.seconds || 0) / 3600).toFixed(2)].map((value) => `"${String(value).replaceAll('"', '""')}"`);
+        const cells = [dateKey, categoryId, category.name, hostname, entry?.lastTitle || "", entry?.lastUrl || "", entry?.seconds || 0, ((entry?.seconds || 0) / 3600).toFixed(2)].map(StatsStore.csvCell);
         lines.push(cells.join(","));
       }
     }
@@ -889,16 +922,16 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   async function clearStats() {
     if (!window.confirm("确认清空所有统计数据吗？此操作不可撤销。")) return;
-    await storageSet("local", { [STORAGE_KEY]: createEmptyStats() });
-    await storageRemove("session", SESSION_KEY);
+    await StatsStore.request("CLEAR_STATS");
+    state.summaryCache.clear();
     state.currentDate = new Date();
     state.currentWeekDate = new Date();
-    state.currentMonthDate = new Date();
+    state.currentMonthDate = StatsStore.shiftMonth(new Date(), 0);
     await renderActiveReport();
   }
 
   async function toggleFocusMode() {
-    const { focusConfig } = await loadContext();
+    const { focusConfig } = await loadSettings();
     await storageSet("local", { [FOCUS_CONFIG_KEY]: { ...focusConfig, enabled: !focusConfig.enabled } });
   }
 
@@ -920,7 +953,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   elements.sceneRelaxBtn.addEventListener("click", async () => { await applyScene("relax"); });
   elements.todayBtn.addEventListener("click", async () => { state.activeReport = REPORT_TYPES.DAILY; state.currentDate = new Date(); await renderActiveReport(); });
   elements.thisWeekBtn.addEventListener("click", async () => { state.activeReport = REPORT_TYPES.WEEKLY; state.currentWeekDate = new Date(); await renderActiveReport(); });
-  elements.thisMonthBtn.addEventListener("click", async () => { state.activeReport = REPORT_TYPES.MONTHLY; state.currentMonthDate = new Date(); await renderActiveReport(); });
+  elements.thisMonthBtn.addEventListener("click", async () => { state.activeReport = REPORT_TYPES.MONTHLY; state.currentMonthDate = StatsStore.shiftMonth(new Date(), 0); await renderActiveReport(); });
   elements.siteViewBtn.addEventListener("click", async () => { state.activeView = VIEW_TYPES.SITE; await renderActiveReport(); });
   elements.categoryViewBtn.addEventListener("click", async () => { state.activeView = VIEW_TYPES.CATEGORY; await renderActiveReport(); });
   elements.prevDayBtn.addEventListener("click", async () => { state.currentDate.setDate(state.currentDate.getDate() - 1); await renderActiveReport(); });
@@ -939,10 +972,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.currentWeekDate = nextDate;
     await renderActiveReport();
   });
-  elements.prevMonthBtn.addEventListener("click", async () => { state.currentMonthDate.setMonth(state.currentMonthDate.getMonth() - 1); await renderActiveReport(); });
+  elements.prevMonthBtn.addEventListener("click", async () => { state.currentMonthDate = StatsStore.shiftMonth(state.currentMonthDate, -1); await renderActiveReport(); });
   elements.nextMonthBtn.addEventListener("click", async () => {
-    const nextDate = new Date(state.currentMonthDate);
-    nextDate.setMonth(nextDate.getMonth() + 1);
+    const nextDate = StatsStore.shiftMonth(state.currentMonthDate, 1);
     if (isFutureMonth(nextDate)) return window.alert("不能查看未来月报。");
     state.currentMonthDate = nextDate;
     await renderActiveReport();
@@ -954,8 +986,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   elements.clearBtn.addEventListener("click", async () => { await clearStats(); });
 
   chrome.storage.onChanged.addListener(async (changes, areaName) => {
-    if (areaName === "local" && (changes[STORAGE_KEY] || changes[CATEGORY_CONFIG_KEY] || changes[GOAL_CONFIG_KEY] || changes[FOCUS_CONFIG_KEY] || changes[SCENE_CONFIG_KEY] || changes[LLM_CONFIG_KEY] || changes[LLM_FEATURE_FLAGS_KEY])) {
+    if (areaName === "local" && (changes[CATEGORY_CONFIG_KEY] || changes[GOAL_CONFIG_KEY] || changes[FOCUS_CONFIG_KEY] || changes[SCENE_CONFIG_KEY] || changes[LLM_CONFIG_KEY] || changes[LLM_FEATURE_FLAGS_KEY])) {
       await renderActiveReport();
+    } else if (areaName === "session" && changes[SESSION_KEY] && !state.reportPending) {
+      await renderActiveReport({ refreshSummary: false });
     }
   });
 
@@ -965,4 +999,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   await renderActiveReport();
+  setInterval(() => {
+    if (state.hasRunningSession && !state.reportPending) void renderActiveReport({ refreshSummary: false });
+  }, 5000);
 });

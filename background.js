@@ -9,6 +9,7 @@ const PRESENCE_CONFIG_KEY = "presenceConfig";
 const BEHAVIOR_RUNTIME_KEY = "behaviorRuntime";
 const LEGACY_KEYS = ["dailyStats", "weeklyStats", "tabMeta"];
 const BEHAVIOR_ALARM_NAME = "behavior-check";
+const NOTIFICATION_ICON_URL = "images/icon128.png";
 const DEFAULT_CATEGORIES = [
   { id: "work", name: "工作", system: true },
   { id: "study", name: "学习", system: true },
@@ -456,7 +457,7 @@ async function evaluateBehaviorRules(now) {
 
       await createNotification(`goal-${todayKey}-${categoryId}`, {
         type: "basic",
-        iconUrl: "images/icon128.svg",
+        iconUrl: NOTIFICATION_ICON_URL,
         title: "今日目标已达成",
         message: `你在该分类上的累计时长已经达到 ${minutes} 分钟。`,
       });
@@ -486,7 +487,7 @@ async function evaluateBehaviorRules(now) {
     ) {
       await createNotification(`focus-${session.tabId}`, {
         type: "basic",
-        iconUrl: "images/icon128.svg",
+        iconUrl: NOTIFICATION_ICON_URL,
         title: "专注模式提醒",
         message: "当前站点不在专注模式允许列表中，建议切回目标任务。",
       });
@@ -504,7 +505,7 @@ async function evaluateBehaviorRules(now) {
         if (!nextRuntime.distractionNotifications[reminderKey]) {
           await createNotification(`distraction-${session.tabId}`, {
             type: "basic",
-            iconUrl: "images/icon128.svg",
+            iconUrl: NOTIFICATION_ICON_URL,
             title: "分心提醒",
             message: `你已经在当前分心分类停留约 ${elapsedMinutes} 分钟。`,
           });

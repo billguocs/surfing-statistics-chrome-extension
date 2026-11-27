@@ -1,6 +1,7 @@
 /* Shared by the service worker and the extension pages. */
 const StatsStore = (() => {
   const tables = ["daily", "weekly", "sites", "meta"];
+  const MAX_UNVERIFIED_MS = 2 * 60 * 1000;
   let database;
 
   function openDatabase() {
@@ -127,30 +128,103 @@ const StatsStore = (() => {
     }));
   }
 
+  async function repairIsoWeeks({ daily, weekly, sites, meta }) {
+    if (await readRequest(meta.get("isoWeekRepairVersion"))) return;
+    const [days, originalWeeks] = await Promise.all([readBuckets(daily), readBuckets(weekly)]);
+    const rebuilt = new Map();
+    const remaining = new Map(originalWeeks.map(([key, rows]) => [key,
+      new Map(rows.map(([host, milliseconds, reference]) => [host, { milliseconds, reference }]))
+    ]));
+    const unmatched = new Map();
+
+    for (const [day, rows] of days.sort(([a], [b]) => a.localeCompare(b))) {
+      const date = new Date(`${day}T12:00:00`);
+      if (!Number.isFinite(date.getTime()) || dateKey(date) !== day) continue;
+      const key = weekKey(date);
+      if (!rebuilt.has(key)) rebuilt.set(key, new Map());
+      for (const [host, milliseconds, reference] of rows) {
+        const previous = rebuilt.get(key).get(host);
+        rebuilt.get(key).set(host, { milliseconds: (previous?.milliseconds || 0) + milliseconds, reference });
+      }
+    }
+
+    // First consume matching ISO buckets; preserve totals that have no daily records.
+    for (const [key, hosts] of rebuilt) {
+      for (const [host, entry] of hosts) {
+        const original = remaining.get(key)?.get(host);
+        const matched = Math.min(entry.milliseconds, original?.milliseconds || 0);
+        if (original) original.milliseconds -= matched;
+        unmatched.set(host, (unmatched.get(host) || 0) + entry.milliseconds - matched);
+      }
+    }
+    for (const hosts of remaining.values()) {
+      for (const [host, entry] of hosts) {
+        const matched = Math.min(entry.milliseconds, unmatched.get(host) || 0);
+        entry.milliseconds -= matched;
+        unmatched.set(host, (unmatched.get(host) || 0) - matched);
+      }
+    }
+    for (const [key, hosts] of remaining) {
+      for (const [host, entry] of hosts) {
+        if (entry.milliseconds <= 0) continue;
+        if (!rebuilt.has(key)) rebuilt.set(key, new Map());
+        const previous = rebuilt.get(key).get(host);
+        rebuilt.get(key).set(host, { ...entry, milliseconds: entry.milliseconds + (previous?.milliseconds || 0) });
+      }
+    }
+
+    const references = new Map();
+    for (const [, rows] of originalWeeks) {
+      for (const [, , reference] of rows) changeReferenceCount(references, reference, -1);
+    }
+    weekly.clear();
+    for (const [key, hosts] of rebuilt) {
+      const rows = [...hosts].map(([host, entry]) => [host, entry.milliseconds, entry.reference]);
+      for (const [, , reference] of rows) changeReferenceCount(references, reference, 1);
+      weekly.put(rows, key);
+    }
+    // Back up self-contained metadata, so reference-count cleanup cannot invalidate it.
+    if (originalWeeks.length) {
+      const backup = await Promise.all(originalWeeks.map(async ([key, rows]) => [key,
+        await Promise.all(rows.map(async ([host, milliseconds, reference]) =>
+          [host, milliseconds, metadataFromEntry(await readRequest(sites.get(reference)))])
+        )
+      ]));
+      meta.put(backup, "weeklyBeforeIsoRepair");
+    }
+    await updateReferences(sites, references);
+    meta.put(1, "isoWeekRepairVersion");
+  }
+
   async function migrate(loadLegacy) {
-    const initialized = await transaction("readonly", ({ meta }) => readRequest(meta.get("initialized")));
-    if (initialized) return;
-    const legacy = await loadLegacy();
-    await transaction("readwrite", async ({ daily, weekly, sites, meta }) => {
-      if (await readRequest(meta.get("initialized"))) return;
-      const writeMetadata = metadataWriter(sites);
-      const references = new Map();
-      for (const [name, store] of [["daily", daily], ["weekly", weekly]]) {
-        for (const [key, bucket] of Object.entries(legacy[name] || {})) {
-          const entries = await Promise.all(Object.entries(bucket || {}).map(async ([host, entry]) => [
-            host,
-            Math.round((Number(entry?.seconds) || 0) * 1000),
-            await writeMetadata(host, metadataFromEntry(entry)),
-          ]));
-          if (entries.length) {
-            for (const [, , reference] of entries) changeReferenceCount(references, reference, 1);
-            store.put(entries, key);
+    const [initialized, repaired] = await transaction("readonly", ({ meta }) =>
+      Promise.all([readRequest(meta.get("initialized")), readRequest(meta.get("isoWeekRepairVersion"))])
+    );
+    if (initialized && repaired) return;
+    const legacy = initialized ? null : await loadLegacy();
+    await transaction("readwrite", async (stores) => {
+      const { daily, weekly, sites, meta } = stores;
+      if (!await readRequest(meta.get("initialized"))) {
+        const writeMetadata = metadataWriter(sites);
+        const references = new Map();
+        for (const [name, store] of [["daily", daily], ["weekly", weekly]]) {
+          for (const [key, bucket] of Object.entries(legacy[name] || {})) {
+            const entries = await Promise.all(Object.entries(bucket || {}).map(async ([host, entry]) => [
+              host,
+              Math.round((Number(entry?.seconds) || 0) * 1000),
+              await writeMetadata(host, metadataFromEntry(entry)),
+            ]));
+            if (entries.length) {
+              for (const [, , reference] of entries) changeReferenceCount(references, reference, 1);
+              store.put(entries, key);
+            }
           }
         }
+        await updateReferences(sites, references);
+        meta.put(legacy.updatedAt || null, "updatedAt");
+        meta.put(true, "initialized");
       }
-      await updateReferences(sites, references);
-      meta.put(legacy.updatedAt || null, "updatedAt");
-      meta.put(true, "initialized");
+      await repairIsoWeeks(stores);
     });
   }
 
@@ -200,8 +274,14 @@ const StatsStore = (() => {
     if (!session?.isRunning) return;
     return transaction("readwrite", async ({ daily, weekly, sites, meta }) => {
       const checkpoint = await readRequest(meta.get("checkpoint"));
-      const segments = splitRange(settledThrough(session, checkpoint), end);
-      if (!segments.length) return;
+      const start = settledThrough(session, checkpoint);
+      if (end <= start) return;
+      // Alarms do not wake a sleeping device. Never backfill a long unverified gap.
+      if (end - start > MAX_UNVERIFIED_MS) {
+        meta.put({ id: session.id, end }, "checkpoint");
+        return { interrupted: true };
+      }
+      const segments = splitRange(start, end);
       const writeMetadata = metadataWriter(sites);
       const references = new Map();
       for (const [name, store] of [["day", daily], ["week", weekly]]) {
@@ -237,6 +317,7 @@ const StatsStore = (() => {
       daily.clear();
       weekly.clear();
       sites.clear();
+      meta.delete("weeklyBeforeIsoRepair");
       meta.put(null, "updatedAt");
       if (session) meta.put({ id: session.id, end: now }, "checkpoint");
       else meta.delete("checkpoint");
@@ -244,7 +325,7 @@ const StatsStore = (() => {
   }
 
   function withActiveSession(stats, session, now = Date.now()) {
-    if (!session?.isRunning) return stats;
+    if (!session?.isRunning || now - session.startedAt > MAX_UNVERIFIED_MS) return stats;
     const next = { ...stats, daily: { ...stats.daily }, weekly: { ...stats.weekly } };
     for (const segment of splitRange(session.startedAt, now)) {
       for (const [name, key] of [["daily", segment.day], ["weekly", segment.week]]) {

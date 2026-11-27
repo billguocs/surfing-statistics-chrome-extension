@@ -74,7 +74,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 目标达成、专注模式、分心提醒都依赖一个 **`behavior-check` alarm（periodInMinutes: 1）** 定时评估，而不是实时累计触发。每次评估读取 stats + 配置，用 `behaviorRuntime`（local）记录"已发过的通知"来去重；key 会按日期（目标通知）或 session 前缀（`tabId:url:startedAt`，专注/分心通知）裁剪清理，避免同一提醒反复弹出。服务 worker 被杀后 alarm 仍在后台注册。
 
-同一个 **`behavior-check`** alarm 每分钟结算一次当前会话，并按 `presenceConfig` 检查空闲状态（默认开启，阈值 3 分钟）。系统空闲且前台页面没有播放音视频时，会话先结算再标记为空闲暂停。页面可见时，content.js 将点击、滚轮、键盘和触摸交互节流为 `PAGE_ACTIVE` 消息，间隔至少 15 秒。后台确认消息来自当前聚焦且因空闲暂停的标签页后，从交互时刻重新开始计时。
+同一个 **`behavior-check`** alarm 每分钟结算一次当前会话，并按 `presenceConfig` 检查空闲状态（默认开启，阈值 3 分钟）。系统空闲且前台页面（包括 iframe）没有播放音视频时，会话先结算再标记为空闲暂停。页面及 iframe 可见时，content.js 将点击、滚轮、键盘和触摸交互节流为 `PAGE_ACTIVE` 消息，间隔至少 15 秒。后台确认消息来自当前聚焦且因空闲暂停的标签页后，从交互时刻重新开始计时。只有顶层文档的可见性消息能暂停或恢复整页会话。
+
+若距离上次结算点超过 **2 分钟**，stats.js 跳过整段未确认区间并推进 checkpoint，避免电脑休眠期间虚增时长；弹窗实时叠加使用同一规则。该保守策略在 Chrome 长时间卡顿时也可能少计。ISO 周历史修复、iframe 消息汇总和验证步骤见 `docs/2026-11-26-tracking-reliability.md`。
 
 ## 报表是派生视图
 

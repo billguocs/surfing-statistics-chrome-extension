@@ -34,6 +34,7 @@ const DEFAULT_FOCUS_CONFIG = {
 
 let eventQueue = Promise.resolve();
 let initializationPromise = null;
+const pendingMediaQueries = new Map();
 
 function storageGet(area, keys) {
   return new Promise((resolve, reject) => {
@@ -403,6 +404,22 @@ async function ensureBehaviorAlarm() {
   }
 }
 
+function hasActiveMediaInTab(tabId) {
+  return new Promise((resolve) => {
+    const requestId = crypto.randomUUID();
+    const finish = (active) => {
+      clearTimeout(timer);
+      pendingMediaQueries.delete(requestId);
+      resolve(active);
+    };
+    // Broadcast to every injected frame. A positive reply from any frame wins.
+    const timer = setTimeout(() => finish(false), 500);
+    pendingMediaQueries.set(requestId, { tabId, finish });
+    chrome.tabs.sendMessage(tabId, { type: "GET_MEDIA_STATE", requestId })
+      .then((media) => { if (media?.hasActiveMedia) finish(true); }, () => finish(false));
+  });
+}
+
 async function pauseIfIdle(session, now) {
   const result = await storageGet("local", PRESENCE_CONFIG_KEY);
   const config = result[PRESENCE_CONFIG_KEY] || {};
@@ -411,8 +428,7 @@ async function pauseIfIdle(session, now) {
   const idleState = await chrome.idle.queryState(minutes * 60);
   if (idleState !== "idle" && idleState !== "locked") return false;
 
-  const media = await chrome.tabs.sendMessage(session.tabId, { type: "GET_MEDIA_STATE" }, { frameId: 0 }).catch(() => null);
-  if (media?.hasActiveMedia) return false;
+  if (await hasActiveMediaInTab(session.tabId)) return false;
 
   await changeSession(null, now, { pause: true, pauseReason: "idle" });
   return true;
@@ -427,7 +443,13 @@ async function checkFocusedSession(now, { checkpoint = false } = {}) {
     return;
   }
 
-  if (!await pauseIfIdle(session, now) && checkpoint) await StatsStore.settle(session, now);
+  if (!await pauseIfIdle(session, now) && checkpoint) {
+    const result = await StatsStore.settle(session, now);
+    if (result?.interrupted) {
+      // Distraction reminders must also start over after an unverified interruption.
+      await setSession({ ...session, id: crypto.randomUUID(), startedAt: now });
+    }
+  }
 }
 
 async function evaluateBehaviorRules(now) {
@@ -645,7 +667,28 @@ chrome.runtime.onMessage.addListener((request, sender, respond) => {
     }
   }
 
-  if (!sender.tab?.id || sender.frameId !== 0) return;
+  if (!sender.tab?.id || !Number.isInteger(sender.frameId) || sender.frameId < 0) return;
+  if (request?.type === "FRAME_MEDIA_STATE") {
+    // Do not enqueue these replies: the current queued idle check is awaiting them.
+    const pending = pendingMediaQueries.get(request.requestId);
+    if (pending?.tabId === sender.tab.id && request.hasActiveMedia === true &&
+        (!sender.documentLifecycle || sender.documentLifecycle === "active")) pending.finish(true);
+    return;
+  }
+  if (request?.type === "PAGE_ACTIVE") {
+    scheduleEvent("Failed to resume page interaction", async (now) => {
+      const session = await getSession();
+      if (session?.pauseReason !== "idle" || session.tabId !== sender.tab.id ||
+          session.url !== sender.tab.url ||
+          (sender.documentLifecycle && sender.documentLifecycle !== "active")) return;
+      const tab = await getFocusedTab();
+      if (tab?.id !== session.tabId || tab.url !== session.url) return;
+      if (sender.frameId === 0 && sender.url !== session.url) return;
+      await changeSession(tab, now, { documentId: sender.frameId === 0 ? sender.documentId : session.documentId });
+    });
+    return;
+  }
+  if (sender.frameId !== 0) return;
   if (request?.type === "PAGE_HIDDEN") {
     scheduleEvent("Failed to pause hidden page", async (now) => {
       const session = await getSession();
@@ -654,12 +697,8 @@ chrome.runtime.onMessage.addListener((request, sender, respond) => {
         await changeSession(null, now, { pause: true });
       }
     });
-  } else if (request?.type === "PAGE_VISIBLE" || request?.type === "PAGE_ACTIVE") {
+  } else if (request?.type === "PAGE_VISIBLE") {
     scheduleEvent("Failed to resume visible page", async (now) => {
-      if (request.type === "PAGE_ACTIVE") {
-        const session = await getSession();
-        if (session?.pauseReason !== "idle" || session.tabId !== sender.tab.id || session.url !== sender.url) return;
-      }
       const tab = await getFocusedTab();
       if (tab?.id === sender.tab.id && tab.url === sender.url) {
         await changeSession(tab, now, { documentId: sender.documentId });

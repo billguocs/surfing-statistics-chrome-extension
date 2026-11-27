@@ -23,23 +23,28 @@ function syncVisibilityState() {
   sendVisibilityMessage("PAGE_VISIBLE");
 }
 
-document.addEventListener("visibilitychange", syncVisibilityState);
-
-window.addEventListener("pagehide", () => {
-  sendVisibilityMessage("PAGE_HIDDEN");
-});
-
-window.addEventListener("pageshow", () => {
+// Child-frame navigation/visibility must never pause or replace the whole tab.
+if (window === window.top) {
+  document.addEventListener("visibilitychange", syncVisibilityState);
+  window.addEventListener("pagehide", () => sendVisibilityMessage("PAGE_HIDDEN"));
+  window.addEventListener("pageshow", syncVisibilityState);
   syncVisibilityState();
-});
-
-syncVisibilityState();
+}
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request?.type !== "GET_MEDIA_STATE") return;
   const hasActiveMedia = Array.from(document.querySelectorAll("video, audio"))
     .some((media) => !media.paused && !media.ended);
   sendResponse({ hasActiveMedia });
+  // tabs.sendMessage returns only one frame's response. Report positives separately
+  // so a fast negative response from the top document cannot hide a playing iframe.
+  if (request.requestId && hasActiveMedia) {
+    try {
+      chrome.runtime.sendMessage({ type: "FRAME_MEDIA_STATE", requestId: request.requestId, hasActiveMedia }).catch(() => {});
+    } catch (error) {
+      console.warn("Extension context invalidated:", error);
+    }
+  }
 });
 
 let lastActiveSentAt = 0;

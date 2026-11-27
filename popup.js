@@ -132,6 +132,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     summaryCache: new Map(),
     reportRunId: 0,
     reportPending: false,
+    reportRefreshPending: false,
     hasRunningSession: false,
   };
 
@@ -820,11 +821,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     const summaryRunId = refreshSummary ? ++state.summaryRunId : state.summaryRunId;
     const { days, weeks, trendEnd } = selectedReportRange();
     state.reportPending = true;
+    state.reportRefreshPending = false;
     let report, settings;
     try {
       [report, settings] = await Promise.all([StatsStore.request("GET_STATS", { days, weeks }), loadSettings()]);
     } catch (error) {
       if (runId !== state.reportRunId) return;
+      state.reportRefreshPending = false;
       console.warn("Failed to load report", error);
       elements.emptyState.style.display = "block";
       elements.emptyState.textContent = "读取统计失败，请关闭弹窗后重试。";
@@ -833,6 +836,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (runId === state.reportRunId) state.reportPending = false;
     }
     if (runId !== state.reportRunId) return;
+    // Session changes during loading invalidate this snapshot; coalesce them into one new request.
+    if (state.reportRefreshPending) return renderActiveReport({ refreshSummary });
     const { categoryConfig, goalConfig, focusConfig, sceneConfig, llmConfig, llmFeatureFlags } = settings;
     const { stats: recordedStats, session } = report;
     state.hasRunningSession = Boolean(session?.isRunning);
@@ -988,8 +993,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   chrome.storage.onChanged.addListener(async (changes, areaName) => {
     if (areaName === "local" && (changes[CATEGORY_CONFIG_KEY] || changes[GOAL_CONFIG_KEY] || changes[FOCUS_CONFIG_KEY] || changes[SCENE_CONFIG_KEY] || changes[LLM_CONFIG_KEY] || changes[LLM_FEATURE_FLAGS_KEY])) {
       await renderActiveReport();
-    } else if (areaName === "session" && changes[SESSION_KEY] && !state.reportPending) {
-      await renderActiveReport({ refreshSummary: false });
+    } else if (areaName === "session" && changes[SESSION_KEY]) {
+      if (state.reportPending) state.reportRefreshPending = true;
+      else await renderActiveReport({ refreshSummary: false });
     }
   });
 

@@ -115,6 +115,7 @@ test("serialized tracking flushes before internal pages and ignores unfocused ta
   let focused = true;
   let idleState = "active";
   let hasActiveMedia = false;
+  let iframeMedia = false;
   const settled = [];
   const chrome = {
     runtime: { onInstalled: event(), onStartup: event(), onMessage: event(), getURL: () => "chrome-extension://test/" },
@@ -126,11 +127,17 @@ test("serialized tracking flushes before internal pages and ignores unfocused ta
       onActivated: event(), onUpdated: event(), onRemoved: event(),
       get: async (id) => tabs.get(id),
       query: (_, callback) => callback([active]),
-      sendMessage: async () => ({ hasActiveMedia }),
+      sendMessage: async (tabId, request, options) => {
+        assert.equal(options, undefined); // Media queries must reach child frames too.
+        if (iframeMedia) setImmediate(() => chrome.runtime.onMessage.emit({
+          type: "FRAME_MEDIA_STATE", requestId: request.requestId, hasActiveMedia: true,
+        }, { tab: active, frameId: 5, url: "https://player.test/", documentLifecycle: "active" }));
+        return { hasActiveMedia };
+      },
     },
   };
   load("background.js", {
-    chrome, importScripts() {}, console, Date: Clock, URL, crypto: require("node:crypto").webcrypto,
+    chrome, importScripts() {}, console, Date: Clock, URL, setTimeout, clearTimeout, crypto: require("node:crypto").webcrypto,
     StatsStore: {
       ...stats,
       migrate: (read) => read(),
@@ -146,7 +153,7 @@ test("serialized tracking flushes before internal pages and ignores unfocused ta
   });
   const get = (type = "GET_STATS") => new Promise((resolve) =>
     chrome.runtime.onMessage.emit({ type }, { url: "chrome-extension://test/popup.html" }, resolve));
-  const message = (type, tab) => chrome.runtime.onMessage.emit({ type }, { tab, url: tab.url, frameId: 0 });
+  const message = (type, tab, extra = {}) => chrome.runtime.onMessage.emit({ type }, { tab, url: tab.url, frameId: 0, ...extra });
   const activate = ({ id: tabId, windowId }) => chrome.tabs.onActivated.emit({ tabId, windowId });
   assert.equal((await get()).session.tabId, first.id);
   time += 30000;
@@ -185,6 +192,8 @@ test("serialized tracking flushes before internal pages and ignores unfocused ta
   message("PAGE_ACTIVE", second);
   assert.equal((await get()).session.isRunning, false);
   await chrome.windows.onFocusChanged.emit(second.windowId);
+  message("PAGE_VISIBLE", second, { documentId: "top-document" });
+  assert.equal((await get()).session.documentId, "top-document");
   time += 190000;
   idleState = "idle";
   hasActiveMedia = true;
@@ -193,13 +202,30 @@ test("serialized tracking flushes before internal pages and ignores unfocused ta
 
   time += 60000;
   hasActiveMedia = false;
+  iframeMedia = true;
+  await chrome.alarms.onAlarm.emit({ name: "behavior-check" });
+  assert.equal((await get()).session.isRunning, true); // A fast top-frame negative must not hide iframe media.
+  message("PAGE_HIDDEN", second, { frameId: 5, url: "https://player.test/" });
+  assert.equal((await get()).session.isRunning, true);
+
+  time += 60000;
+  iframeMedia = false;
   await chrome.alarms.onAlarm.emit({ name: "behavior-check" });
   const paused = (await get()).session;
   assert.equal(paused.pauseReason, "idle");
   assert.equal(paused.isRunning, false);
   time += 1000;
-  message("PAGE_ACTIVE", second);
+  message("PAGE_VISIBLE", second, { frameId: 5, url: "https://player.test/" });
+  message("PAGE_ACTIVE", first, { frameId: 5, url: "https://player.test/" });
+  message("PAGE_ACTIVE", second, { frameId: 5, url: "https://player.test/", documentLifecycle: "cached" });
+  assert.equal((await get()).session.isRunning, false);
+  focused = false;
+  message("PAGE_ACTIVE", second, { frameId: 5, url: "https://player.test/" });
+  assert.equal((await get()).session.isRunning, false);
+  focused = true;
+  message("PAGE_ACTIVE", second, { frameId: 5, url: "https://player.test/", documentId: "child-document" });
   const resumed = (await get()).session;
+  assert.equal(resumed.documentId, "top-document");
   assert.equal(resumed.isRunning, true);
   assert.equal(resumed.startedAt, time);
   assert.notEqual(resumed.id, paused.id);
@@ -338,3 +364,7 @@ test("undo restores confirmed deletions only and retains failed restores for ret
   assert.equal(local.data.lastMutation, undefined);
   assert.deepEqual([...nodes.values()].map((node) => node.url).sort(), [one.url, two.url]);
 });
+
+require("./tracking-storage.cjs");
+require("./frame-tracking.cjs");
+require("./popup-refresh.cjs");
